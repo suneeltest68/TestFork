@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pytz
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
+import pandas as pd
+import pytz
 
 from fyers_common import FyersSymbolMaster, legacy_instrument_csv
 
