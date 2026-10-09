@@ -5,7 +5,6 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.atomic.AtomicReference
 
 private val ist = ZoneId.of("Asia/Kolkata")
 
@@ -51,29 +50,29 @@ private fun runPaper() {
     val paper = PaperTrader()
     val initial = Backtest.resample(warmup, 5)
     initial.dropLast(1).forEach(paper::onCompletedFiveMinuteCandle)
-    val currentMinute = AtomicReference<Candle?>(null)
-    val lastClosedMinute = AtomicReference<LocalDateTime?>(null)
+    val currentMinute = java.util.concurrent.atomic.AtomicReference<Candle?>(null)
+    val liveCandles = warmup.toMutableList()
+    var lastEvaluatedFiveMinute: LocalDateTime = initial.dropLast(1).lastOrNull()?.timestamp ?: LocalDateTime.MIN
     val ticker = client.connectTicker { time, price ->
         val minute = time.withSecond(0).withNano(0)
-        synchronized(currentMinute) {
+        synchronized(liveCandles) {
             val previous = currentMinute.get()
             if (previous == null) {
                 currentMinute.set(Candle(minute, price, price, price, price))
             } else if (previous.timestamp == minute) {
                 currentMinute.set(previous.copy(high = maxOf(previous.high, price), low = minOf(previous.low, price), close = price))
-            } else {
-                if (minute.isAfter(previous.timestamp)) {
-                    if (lastClosedMinute.get() != previous.timestamp) {
-                        lastClosedMinute.set(previous.timestamp)
-                        val source = (warmup + listOf(previous)).distinctBy { it.timestamp }.sortedBy { it.timestamp }
-                        val five = Backtest.resample(source, 5)
-                        val completed = five.dropLast(1).lastOrNull()
-                        if (completed != null && completed.timestamp.isAfter(initial.lastOrNull()?.timestamp ?: LocalDateTime.MIN)) {
-                            paper.onCompletedFiveMinuteCandle(completed)
-                        }
-                    }
-                    currentMinute.set(Candle(minute, price, price, price, price))
+            } else if (minute.isAfter(previous.timestamp)) {
+                // The prior minute is now complete; keep it so resampling has the
+                // entire session rather than just the most recent tick candle.
+                liveCandles.removeAll { it.timestamp == previous.timestamp }
+                liveCandles += previous
+                val five = Backtest.resample(liveCandles, 5)
+                val completed = five.lastOrNull()?.takeIf { it.timestamp.plusMinutes(5).isBefore(minute) || it.timestamp.plusMinutes(5) == minute }
+                if (completed != null && completed.timestamp.isAfter(lastEvaluatedFiveMinute)) {
+                    lastEvaluatedFiveMinute = completed.timestamp
+                    paper.onCompletedFiveMinuteCandle(completed)
                 }
+                currentMinute.set(Candle(minute, price, price, price, price))
             }
         }
     }
