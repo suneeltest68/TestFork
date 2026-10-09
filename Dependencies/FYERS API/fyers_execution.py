@@ -23,7 +23,7 @@ from broker_contract import (  # noqa: E402
     BrokerQueryResult, ExecutionClient, OpenOrder, OpenPosition, OrderResult,
     OrderStatus, exact_int, normalize_order_result,
 )
-from fyers_common import FyersSymbolMaster  # noqa: E402
+from fyers_common import FyersSymbolMaster, legacy_instrument_csv  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class FyersExecutionClient:
     def preload_scrip_master(self):
         self.symbols.load("NSE_FO", refresh=True)
         self.symbols.load("NSE_CM", refresh=True)
-        csv_path = os.getenv("FYERS_LEGACY_INSTRUMENT_CSV", "").strip()
+        csv_path = legacy_instrument_csv()
         if csv_path:
             import csv
             with open(csv_path, newline="", encoding="utf-8-sig") as handle:
@@ -137,7 +137,7 @@ class FyersExecutionClient:
                     rows = book.get("orderBook", book.get("data", []))
                     last = next((r for r in rows if str(r.get("id", r.get("orderNumber", ""))) == order_id), None)
                     if last:
-                        state = str(last.get("status", last.get("orderStatus", "")))
+                        state = self._state_label(last.get("status", last.get("orderStatus", "")))
                         filled = last.get("filledQty", last.get("filled_qty", last.get("tradedQty")))
                         result = normalize_order_result(order_id=order_id, requested_quantity=int(quantity),
                             filled_quantity=filled, broker_state=state,
@@ -157,8 +157,9 @@ class FyersExecutionClient:
     def _state_label(value: Any) -> str:
         # FYERS order status enum: 1 cancelled, 2 traded, 4 transit,
         # 5 rejected, 6 pending, 7 expired; unknown values stay unknown.
+        numeric = int(value) if str(value).strip().isdigit() else value
         return {1: "CANCELLED", 2: "TRADED", 4: "TRANSIT", 5: "REJECTED",
-                6: "PENDING", 7: "EXPIRED"}.get(value, str(value).upper())
+                6: "PENDING", 7: "EXPIRED"}.get(numeric, str(value).upper())
 
     def get_order_status(self, order_id: str, requested_quantity: int = 0) -> OrderResult:
         api = self._ensure_api()
