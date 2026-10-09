@@ -45,14 +45,19 @@ private fun runPaper() {
     val client = FyersClient(config)
     val today = LocalDate.now(ist)
     val warmupFrom = today.minusDays(20)
-    val warmup = client.history(warmupFrom, today, "1")
-    require(warmup.isNotEmpty()) { "FYERS returned no warm-up candles" }
+    val fetched = client.history(warmupFrom, today, "1")
+    require(fetched.isNotEmpty()) { "FYERS returned no warm-up candles" }
+    val now = LocalDateTime.now(ist)
+    val currentBucket = now.withMinute((now.minute / 5) * 5).withSecond(0).withNano(0)
+    // Drop the currently-forming 5-minute bucket; it will be rebuilt from ticks.
+    val warmup = fetched.filter { it.timestamp.isBefore(currentBucket) }
     val paper = PaperTrader()
     val initial = Backtest.resample(warmup, 5)
-    initial.dropLast(1).forEach(paper::onCompletedFiveMinuteCandle)
+    val completedWarmup = initial.dropLast(1)
+    paper.seedHistory(completedWarmup)
     val currentMinute = java.util.concurrent.atomic.AtomicReference<Candle?>(null)
     val liveCandles = warmup.toMutableList()
-    var lastEvaluatedFiveMinute: LocalDateTime = initial.dropLast(1).lastOrNull()?.timestamp ?: LocalDateTime.MIN
+    var lastEvaluatedFiveMinute: LocalDateTime = completedWarmup.lastOrNull()?.timestamp ?: LocalDateTime.MIN
     val ticker = client.connectTicker { time, price ->
         val minute = time.withSecond(0).withNano(0)
         synchronized(liveCandles) {
