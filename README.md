@@ -1,38 +1,59 @@
-# EMA Trend Strategy — Kotlin
+# EMA Trend Strategy — Kotlin + FYERS
 
-This branch is a clean Kotlin-only extraction of the repository's **EMA Trend** strategy. The original Python trading system, other strategies, broker adapters, data extractors, and unrelated files are intentionally not included in this branch.
+A focused Kotlin project for **EMA Trend backtesting and paper trading** using FYERS data. Other strategies and the original Python multi-strategy framework are intentionally excluded. This project does not place real orders.
 
-## Strategy preserved
+## Features
 
-- EMA periods: 4, 11, 18
-- ATR / ADX periods: 14 / 14
-- Slope lookback: 3 candles
-- ADX threshold: greater than 20
-- EMA distance filter: 0.5 × ATR
-- EMA11 slope threshold: 0.3 × ATR
-- EMA18 slope threshold: 0.2 × ATR
-- Candle body must be at least 50% of candle range
-- Long entries require bullish EMA ordering and positive, strengthening slopes
-- Short entries require bearish EMA ordering and negative, strengthening slopes
-- Exit a long when candle low breaches EMA11; exit a short when candle high breaches EMA11
+- FYERS REST historical candles for warm-up and historical backtests
+- FYERS WebSocket live LTP stream for paper-mode price updates
+- EMA 4/11/18, ATR(14), ADX(14), 3-bar slope filters, EMA-distance and candle-body confirmation
+- Five-minute strategy candles derived from one-minute OHLC
+- CSV backtesting without broker credentials
+- Paper position tracking and underlying-point P&L, without order submission
 
-Indicator warm-up uses a deterministic Kotlin implementation of EMA, Wilder ATR, and Wilder ADX. This removes Python, pandas, NumPy, and TA-Lib runtime dependencies. Small numerical differences from TA-Lib may exist and should be compared against reference candles before live use.
+## Setup
 
-## Build and run
+Requires JDK 17+ and Gradle.
 
-Requires JDK 17+ and Gradle (or use the Gradle wrapper if added).
+Create a local `.env` file in the project root (do not commit it):
+
+```dotenv
+FYERS_APP_ID=your_app_id
+FYERS_ACCESS_TOKEN=your_access_token
+FYERS_SYMBOL=NSE:NIFTY50-INDEX
+```
+
+The FYERS access token is short-lived and must be refreshed using your approved FYERS OAuth flow. Never commit tokens or API secrets. The app ID and token are sent to FYERS using its documented authorization header.
+
+## Run a backtest
+
+From a CSV with columns `timestamp,open,high,low,close`:
 
 ```bash
 gradle test
-gradle run
+gradle run --args='backtest --csv data/nifty_1m.csv'
 ```
 
-The sample application evaluates a small synthetic candle series and prints the latest EMA decision. It does **not** connect to a broker or place orders.
+Or fetch historical candles directly from FYERS:
 
-## Input format
+```bash
+gradle run --args='backtest --fyers --from 2026-01-01 --to 2026-01-31'
+```
 
-Create `Candle(timestamp, open, high, low, close)` records in chronological order. `EmaTrendStrategy.evaluate(candles, position)` returns `HOLD`, `ENTER_LONG`, `ENTER_SHORT`, or `EXIT`.
+Historical data is resampled to five-minute candles before EMA signal evaluation. Backtest P&L is measured in underlying index points, not option-premium P&L. Brokerage, slippage, taxes, option selection, lot sizing and realistic option fills are not modeled.
 
-## Safety
+## Run paper trading
 
-This project is signal logic only. It deliberately has no credentials, broker integration, order placement, or live-trading switches. Validate indicator parity, entry/exit behavior, transaction costs, and paper-trading results before adding execution.
+```bash
+gradle run --args='paper'
+```
+
+Paper mode warms indicators from FYERS REST history, then subscribes to FYERS WebSocket prices. It logs simulated signal entries/exits only. It cannot send orders; there is no execution client, live-trading switch, or order-placement API in this project.
+
+## Safety and limitations
+
+- Start with paper mode only.
+- Confirm the FYERS WebSocket auth/subscription payload and REST response schema against your current FYERS API app.
+- Check candle timestamps and the five-minute bucket boundary against reference data.
+- Paper P&L is an underlying-price proxy; the original strategy's option contract and premium-level results require a separate option simulator.
+- This Kotlin port must be compared against the original Python/TA-Lib output before relying on its signals.
