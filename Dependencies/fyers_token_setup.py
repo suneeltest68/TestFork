@@ -16,6 +16,7 @@ from fyers_apiv3 import fyersModel
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATH = ROOT / "Dependencies" / ".env"
 
+
 def main() -> int:
     current = dotenv_values(ENV_PATH) if ENV_PATH.exists() else {}
     app_id = os.getenv("FYERS_APP_ID") or str(current.get("FYERS_APP_ID") or "").strip()
@@ -73,6 +74,7 @@ def main() -> int:
     ENV_PATH.write_text("\n".join(output) + "\n", encoding="utf-8")
     print(f"Saved FYERS_ACCESS_TOKEN to {ENV_PATH}. Token value not displayed.")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
