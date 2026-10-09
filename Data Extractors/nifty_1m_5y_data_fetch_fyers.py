@@ -10,7 +10,7 @@ That means:
 
 What this wrapper does:
 1. Define the default NIFTY security ID and output path.
-2. Reuse the shared chunked Dhan download engine.
+2. Reuse the shared chunked Fyers download engine.
 3. Save the final OHLC CSV into the Backtest Outputs folder.
 
 Default NIFTY values used here:
@@ -22,7 +22,7 @@ Default NIFTY values used here:
 
 import os
 
-from index_1m_5y_data_fetch_dhan_common import IndexFetchDefaults, run_index_fetcher
+from index_1m_5y_data_fetch_fyers_common import IndexFetchDefaults, run_index_fetcher
 
 # Anchor the default output to <repo_root>/Backtest Outputs/ so the CSV
 # always lands in the repo's shared output folder regardless of the cwd

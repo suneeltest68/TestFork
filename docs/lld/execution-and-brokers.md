@@ -188,11 +188,12 @@ legal. 90% branch-coverage budget.
 - Pi v2 browser-token flow, exact NFO index scrip master, documented request
   limits, market-order protection, and `SingleOrdHist` fill confirmation.
 
-### Dhan as both data and execution
+### Fyers market data and Dhan execution
 
-`DhanBrokerClient` (market data) and `dhan_execution_client` (orders) are
-separate sessions on purpose, so a data-side token problem cannot silently
-affect order placement.
+Fyers supplies market data through its own adapter. Dhan remains an optional
+execution broker through `dhan_execution_client`; its order session is separate
+from market data, so a data-side token problem cannot silently affect order
+placement.
 
 ---
 

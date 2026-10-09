@@ -2,7 +2,7 @@
 Beginner-friendly BANKNIFTY wrapper script.
 
 This file is intentionally small because the heavy lifting is shared in:
-`index_1m_5y_data_fetch_dhan_common.py`
+`index_1m_5y_data_fetch_fyers_common.py`
 
 What this wrapper is responsible for:
 1. Define BANKNIFTY-specific defaults.
@@ -18,7 +18,7 @@ Default BANKNIFTY values used here:
 
 import os
 
-from index_1m_5y_data_fetch_dhan_common import IndexFetchDefaults, run_index_fetcher
+from index_1m_5y_data_fetch_fyers_common import IndexFetchDefaults, run_index_fetcher
 
 # Anchor the default output to <repo_root>/Backtest Outputs/ so the CSV
 # always lands in the repo's shared output folder regardless of the cwd

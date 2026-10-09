@@ -1,8 +1,13 @@
 # ADR-0015: Take expired-options history in rolling relative-strike form, and derive the expiry date
 
-**Status:** Accepted
+**Status:** Retired (2026-09-24)
 **Date:** 2026-09-05
 **Deciders:** repository owner
+
+The Dhan-specific expired-options fetcher was removed during the Fyers market-data
+migration. The pinned official Fyers v3 SDK and sample collection did not provide a
+documented expired-options endpoint to migrate to. Existing historical CSVs remain
+valid external backtest inputs; this ADR records the design of the retired fetcher.
 
 ## Context
 

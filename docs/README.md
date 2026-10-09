@@ -61,7 +61,7 @@ component folder's own `Readme.md`.
 | [0012](adr/0012-crash-durable-session-state.md) | Per-trade P&L and open positions persisted during the session |
 | [0013](adr/0013-codeql-false-positive-triage.md) | Five CodeQL alerts dismissed as false positives, not patched |
 | [0014](adr/0014-tiered-rename-of-spaced-filenames.md) | Spaced filenames renamed in reviewable tiers, master last (supersedes 0009) |
-| [0015](adr/0015-rolling-relative-strike-expired-options.md) | Expired-options history kept in rolling relative-strike form, expiry date derived |
+| [0015](adr/0015-rolling-relative-strike-expired-options.md) | Retired Dhan expired-options extractor design (historical reference) |
 | [0016](adr/0016-read-only-loopback-monitoring-dashboard.md) | A read-only loopback dashboard, served by the runner itself |
 | [0017](adr/0017-chart-only-cpr-on-a-truncated-prior-session.md) | The dashboard's CPR reads a truncated prior session; the strategies' does not |
 | [0018](adr/0018-cpr-algo4-as-separate-worker.md) | CPR Algo 4 is its own worker, not a fourth algo inside the CPR worker |

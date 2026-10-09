@@ -36,7 +36,7 @@ to lose track of a position.**
 ```
    fetch                        backtest                      run
    -----                        --------                      ---
- DhanHQ REST      ──►     backtesting.py over          multithreaded front test
+ Fyers REST       ──►     backtesting.py over          multithreaded front test
  1-min OHLC CSV           the same 1-min CSV           (paper by default, live
  (Data Extractors/)       (My Backtest Files/)          when explicitly enabled)
 ```
@@ -70,7 +70,7 @@ trues its bars up against official REST candles (see §5.2).
 | **Throughput** | One index, ~30 workers, a handful of legs each. Trivial. Never the constraint. |
 | **Availability** | One trading session per day, ~09:15–15:30 IST. A crash mid-session is a *safety* event (exposure may exist), not an availability event. |
 | **Correctness** | Fail-closed everywhere. An unknown broker name disables live trading. An unreadable quote refuses a live entry. Ambiguous fill state freezes new live entries rather than guessing. |
-| **Cost** | One DhanHQ subscription, one broker account, optionally one Claude and one Codex subscription. No cloud infrastructure. |
+| **Cost** | Fyers data access, one selected execution broker, optionally one Claude and one Codex subscription. No cloud infrastructure. |
 | **Operability** | One operator (the author). Everything must be diagnosable from one log file and one `.env` audit command. |
 
 ### 2.3 Constraints that shaped the design
@@ -93,7 +93,7 @@ trues its bars up against official REST candles (see §5.2).
 
 ```
                        ┌───────────────────────────────┐
-   DhanHQ Data API ───►│                               │
+   Fyers Data API ────►│                               │
    (REST + optional    │   Front-test master process   │──► Telegram (alerts)
     marketfeed WS)     │   (one Python process)        │
                        │                               │──► Google Sheets (EOD P&L)
@@ -105,11 +105,10 @@ trues its bars up against official REST candles (see §5.2).
    subscriptions
 ```
 
-Note that DhanHQ appears on both sides of the boundary: it is the market-data
-provider for every run, and it is *also* one of the four selectable execution
-brokers. The two sessions are deliberately kept separate (`DhanBrokerClient` for
-data, `dhan_execution_client` for orders) so a data-side token problem cannot
-silently affect order placement, or vice versa.
+Fyers is the market-data provider. Order execution remains independently
+selectable among Kotak, Shoonya, Flattrade, and Dhan. The Fyers data session and
+the selected broker's execution session are separate, so a data-token problem
+cannot silently affect order placement, or vice versa.
 
 ---
 
@@ -178,6 +177,7 @@ repository (90%; see [`../lld/testing-and-ci.md`](../lld/testing-and-ci.md)):
 | `trading_lifecycle.py` | Flatten-then-stop shutdown state machine |
 | `market_data_health.py` | Candle validation and feed-freshness state |
 | `tick_bar_builder.py` | Pure tick→bar helpers for the websocket producer |
+| `fyers_market_data.py` | Fyers REST/option-chain/quote/WebSocket adapter |
 | `risk_sizing.py` | Fail-closed lot sizing against a rupee budget |
 | `next_open_entry.py` | One-bar lifetime and price rebasing for `NEXT_OPEN` signals |
 | `order_splitting.py` | Split oversized orders into exchange-legal chunks |

@@ -1,8 +1,12 @@
 # ADR-0005: REST polling as the default, websocket as an opt-in producer
 
-**Status:** Accepted
+**Status:** Superseded for provider selection by the Fyers migration
 **Date:** 2026-08-10 (retrospective — records PR #79)
 **Deciders:** repository owner
+
+The REST-versus-WebSocket producer choice remains current, but the Dhan-specific
+subscription and implementation details below are historical. Fyers is now the
+market-data provider; see the current system overview.
 
 ## Context
 
@@ -11,7 +15,9 @@ plus every subscribed option leg. With multi-leg baskets (hedged pairs, the
 Delta-0.2 four-leg spread, strangle legs, the SL Hunting BankNIFTY mirror) that
 is a lot of repeated requests for data that mostly has not changed.
 
-Dhan offers a marketfeed websocket under its **paid Data API** subscription.
+At the time of this decision, Dhan offered a marketfeed websocket under its
+**paid Data API** subscription. Dhan-specific provider details below are
+historical; the current market-data provider is Fyers.
 
 Constraints:
 

@@ -31,9 +31,10 @@ only way to prove the filter scrubs a secret before it reaches a handler. Deleti
 or defanging the call to satisfy the scanner would delete the coverage and leave
 the redaction filter unverified.
 
-That filter is not decorative. As `CLAUDE.md` records, `dhanhq`'s marketfeed puts
-the live access token in its websocket URL, so a connect error would otherwise
-write a working credential verbatim into a log file operators routinely share.
+That filter is not decorative. The earlier Dhan marketfeed put its live access
+token in its websocket URL; a connection error could otherwise write a working
+credential verbatim into a log file operators routinely share. The same
+handler-level redaction remains in place for current provider and broker errors.
 These three tests are what keep that from regressing silently.
 
 The alerts are correct that a secret reaches a logging call. They cannot see that

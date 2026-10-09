@@ -12,10 +12,12 @@ operator asked for a **custom** five-minute strategy that may be nondeterministi
 living in the system prompt), designed from backtests on the five-year NIFTY and BankNIFTY one-minute
 data.
 
-The local expired-options set (`Backtest Outputs/expired_options/nifty`, weekly ATM±10 strikes,
+The historical expired-options set (`Backtest Outputs/expired_options/nifty`, weekly ATM±10 strikes,
 one-minute premiums, 2021-09 to 2026-09; see ADR-0015) made it possible to score every idea on
-**real option premiums** rather than spot points. Each trade was priced on its exact contract, with
-a 2-point round-trip cost and the agent's decision delay (entry two minutes after the bar).
+**real option premiums** rather than spot points. The downloader that originally created the set
+has since been retired; reproducing the premium backtest requires the existing local files. Each
+trade was priced on its exact contract, with a 2-point round-trip cost and the agent's decision
+delay (entry two minutes after the bar).
 
 ### What the research found
 

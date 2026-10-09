@@ -183,7 +183,7 @@ THREAD ARCHITECTURE
 - One `CentralMarketDataFetcher` thread:
     * Pulls live 1-minute NIFTY OHLC every poll.
     * Pulls LTPs for NIFTY spot AND every option leg currently held by
-      ANY worker (single batched ticker_data call).
+      ANY worker (batched Fyers quote calls).
     * Publishes everything into a thread-safe `SharedMarketDataStore`.
 
 - Configured `*StrategyWorker` threads:
@@ -200,7 +200,7 @@ deterministic across every enabled strategy.
 
 WHY ONE FILE INSTEAD OF SEPARATE FILES
 --------------------------------------
-- Single fetch budget. One DhanHQ ticker_data call covers spot plus
+- Single fetch budget. One batched Fyers quote request covers spot plus
   every active option leg from every worker simultaneously.
 - One log destination. Every enabled strategy shares LOG_FILE so a single
   audit trail captures the day.
@@ -263,7 +263,6 @@ import sys
 import threading
 import time
 import uuid
-import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -281,14 +280,7 @@ import pandas as pd
 # it inside the helper because the rest of the repo (e.g. the swing strategy
 # data fetcher) already depends on `requests`, so it is guaranteed to be present.
 import requests
-
-# `DhanContext` wraps (client_id, access_token) so the rest of the SDK can
-# share one authenticated session. `DhanLogin` is the auth helper class we
-# use only for `user_profile(...)` startup validation -- the OAuth dance
-# itself happens in `Dependencies/dhan_token_setup.py`, not here.
-# `MarketFeed` is the SDK's websocket live-feed client; it is only exercised
-# when MARKET_DATA_SOURCE=WEBSOCKET selects the tick-driven producer below.
-from dhanhq import DhanContext, DhanLogin, MarketFeed, dhanhq
+from dhanhq import DhanContext, MarketFeed, dhanhq
 
 from Dependencies import dashboard_history, dashboard_indicators, dashboard_snapshot
 from Dependencies.broker_contract import ExecutionClient, OrderResult, OrderStatus
@@ -299,6 +291,12 @@ from Dependencies.execution_ledger import (
     LiveLegState,
     OrderAttemptHandle,
     OrderIntent,
+)
+from Dependencies.fyers_market_data import (
+    DHAN_SCRIP_MASTER_URL,
+    RUNNER_SEGMENT_CODES,
+    FyersMarketDataClient,
+    FyersMarketFeed,
 )
 from Dependencies.market_data_health import (
     MarketDataHealth,
@@ -327,7 +325,6 @@ from Dependencies.startup_exposure import (
     audit_startup_exposure,
 )
 from Dependencies.tick_bar_builder import (
-    SEGMENT_NAME_TO_FEED_CODE,
     TickBarAggregator,
     divergence_stats,
     merge_official_and_tick_frames,
@@ -348,39 +345,6 @@ except ImportError:  # pragma: no cover - optional dependency
     # dependency shape and the one thing a checker cannot express here.
     load_dotenv = None  # type: ignore[assignment]
 
-# dhanhq 2.2.0's marketfeed formats every tick's exchange timestamp through
-# `datetime.utcfromtimestamp()` (its `utc_time` helper), which Python 3.12+
-# deprecated -- so a live websocket session sprays an unactionable
-# DeprecationWarning onto the operator's console for every feed connection.
-# The SDK version is policy-pinned (DEPS-001 in requirements.txt), so until a
-# deliberate bump moves past that call we silence EXACTLY that message from
-# EXACTLY those modules: deprecation warnings raised by our own code, or by any
-# other library, still reach the console.  The warning fires per tick at
-# runtime (never at import), so installing the filter here -- at module load,
-# long before any feed thread starts -- covers every runtime code path.
-#
-# `dhanhq/__init__.py` imports BOTH `marketfeed` and `fulldepth`, and each ships
-# the same `utc_time` helper (marketfeed.py:523, fulldepth.py:391).  The runner
-# only subscribes MarketFeed, so the fulldepth call site should never fire; it is
-# covered anyway because the cost is one regex branch and the alternative is a
-# surprise on the day something reaches for full-depth data.
-#
-# This filter does NOT cover pytest.  Pytest wraps every test in
-# `catch_warnings()` + `simplefilter("always")`, which RESETS `warnings.filters`
-# and discards anything a module installed at import time; only pytest's own
-# `-W` / `[tool.pytest.ini_options] filterwarnings` entries are re-applied
-# inside that context.  The matching ini entries live in `pyproject.toml` and
-# `Tests/Dependencies/test_repository_policy.py` asserts the two stay in step --
-# without them this exact warning reappears in every pytest run even though the
-# runner itself is silent.
-warnings.filterwarnings(
-    "ignore",
-    message=r"datetime\.datetime\.utcfromtimestamp\(\) is deprecated",
-    category=DeprecationWarning,
-    module=r"dhanhq\.(marketfeed|fulldepth)",
-)
-
-
 # =============================================================================
 # STATIC FILE-LEVEL CONFIGURATION
 # =============================================================================
@@ -390,8 +354,8 @@ warnings.filterwarnings(
 # This master file lives at the repo root and the strategy logic lives under
 # `Signal Generators/`, so ROOT_DIR is simply the master file's own directory.
 ROOT_DIR = Path(__file__).resolve().parent
-LOG_FILE = ROOT_DIR / "Dependencies" / "log_files" / "nifty_multi_strategy_master_front_test_dhanhq.log"
-LOGGER_NAME = "nifty_multi_strategy_master_front_test_dhanhq"
+LOG_FILE = ROOT_DIR / "Dependencies" / "log_files" / "nifty_multi_strategy_master_front_test_fyers.log"
+LOGGER_NAME = "nifty_multi_strategy_master_front_test_fyers"
 
 INSTRUMENT_MASTER_GLOB = str(ROOT_DIR / "Dependencies" / "all_instrument *.csv")
 
@@ -402,8 +366,6 @@ INSTRUMENT_MASTER_GLOB = str(ROOT_DIR / "Dependencies" / "all_instrument *.csv")
 # `SM_EXPIRY_DATE`, `LOT_SIZE`, `SECURITY_ID`, `STRIKE_PRICE`, `OPTION_TYPE`,
 # `UNDERLYING_SYMBOL`). The shorter `api-scrip-master.csv` does not carry the
 # same complete option metadata and would break the resolver on the next run.
-DHAN_SCRIP_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv"
-
 # The fetcher publishes only one centralized stream: 1-minute OHLC.
 # Higher timeframes (3-min for Supertrend, 5-min for EMA / Donchian) are
 # derived inside the consuming workers. This keeps the fetch budget tiny.
@@ -552,24 +514,10 @@ def _scaled_float(prefix: str, name: str, default: float) -> float:
 
 
 # =============================================================================
-# DHANHQ CREDENTIALS (read STRICTLY from .env; no in-code defaults)
+# FYERS MARKET-DATA CREDENTIALS (read STRICTLY from .env; no in-code defaults)
 # =============================================================================
-# All four values are populated by the user / by `Dependencies/dhan_token_setup.py`.
-# The runner refuses to start if `CLIENT_CODE` or `ACCESS_TOKEN` is missing -
-# see `main()` for the validation message.
-#
-# DHAN_CLIENT_CODE  : 10-digit dhanClientId (e.g. "1100000000").
-# DHAN_API_KEY      : long-lived "app_id" used by the OAuth setup script.
-# DHAN_API_SECRET   : long-lived "app_secret" pair to DHAN_API_KEY.
-# DHAN_ACCESS_TOKEN : token produced by the setup script. This is what the
-#                     dhanhq SDK actually authenticates with. Its validity is
-#                     stamped into the token by DhanHQ and is NOT 12 months --
-#                     web.dhan.co currently issues 24-hour tokens, so refresh
-#                     it outside market hours before each trading day.
-CLIENT_CODE = _env_str("DHAN_CLIENT_CODE", "")
-API_KEY = _env_str("DHAN_API_KEY", "")
-API_SECRET = _env_str("DHAN_API_SECRET", "")
-ACCESS_TOKEN = _env_str("DHAN_ACCESS_TOKEN", "")
+FYERS_CLIENT_ID = _env_str("FYERS_CLIENT_ID", "")
+FYERS_ACCESS_TOKEN = _env_str("FYERS_ACCESS_TOKEN", "")
 
 
 # =============================================================================
@@ -600,17 +548,15 @@ MIN_BARS = _env_int("MIN_BARS", 120)
 # the MarketDataHealth clocks behave identically under either producer.
 FETCH_POLL_SECONDS = _env_int("FETCH_POLL_SECONDS", 2)
 
-# Which producer feeds the shared market data store.
-#   REST      -> CentralMarketDataFetcher (poll intraday_minute_data + ticker_data).
-#   WEBSOCKET -> WebSocketMarketDataFetcher (Dhan marketfeed ticks build the bars
-#                and LTPs; REST is kept for warmup history and the per-minute
-#                true-up against Dhan's official candles).
-# Requires the paid Dhan Data API subscription in WEBSOCKET mode. Any value
-# other than exactly "WEBSOCKET" FAILS CLOSED to the battle-tested REST poller.
+# Which Fyers producer feeds the shared market-data store.
+#   REST      -> CentralMarketDataFetcher (poll Fyers history + quotes).
+#   WEBSOCKET -> WebSocketMarketDataFetcher (Fyers ticks build bars; Fyers REST
+#                remains the warmup and official-candle true-up source).
+# Any value other than exactly "WEBSOCKET" fails closed to REST polling.
 MARKET_DATA_SOURCE = _env_str("MARKET_DATA_SOURCE", "REST").upper().strip() or "REST"
 
 # Seconds past each minute rollover before the websocket producer trues-up the
-# just-closed candle from REST (Dhan's official candle can lag a few seconds).
+# just-closed candle from Fyers REST.
 WS_TRUEUP_DELAY_SECONDS = _env_float("WS_TRUEUP_DELAY_SECONDS", 5.0)
 
 # How recently (seconds) the websocket must have delivered ANY packet for the
@@ -620,10 +566,7 @@ WS_TRUEUP_DELAY_SECONDS = _env_float("WS_TRUEUP_DELAY_SECONDS", 5.0)
 # silent past this window the existing 10s/30s staleness policy takes over.
 WS_CONN_LIVENESS_SECONDS = _env_float("WS_CONN_LIVENESS_SECONDS", 5.0)
 
-# Native HTTP deadline for the MARKET DATA session. The dhanhq SDK ships a
-# 60-second default (DhanHTTP.HTTP_DEFAULT_TIME_OUT); the execution adapter
-# already overrides it and the producer must too. On 2026-07-22 a slow Dhan
-# response parked the websocket producer for 59-73s at a time.
+# Native HTTP deadline for the Fyers market-data session.
 MARKET_DATA_HTTP_TIMEOUT_SECONDS = _env_float("MARKET_DATA_HTTP_TIMEOUT_SECONDS", 10.0)
 
 # How old a cached option LTP may be and still be used to BOOK a trade at.
@@ -747,21 +690,19 @@ TELEGRAM_BOT_TOKEN = _env_str("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = _env_str("TELEGRAM_CHAT_ID", "").strip()
 
 # How many calendar days of intraday history to request every fetch.
-# DhanHQ supports up to 90 days; we use a small rolling window because all we
-# need is enough bars to satisfy MIN_BARS plus margin for weekends/holidays.
+# Use a small rolling window to satisfy MIN_BARS plus margin for weekends and
+# holidays without requesting the full history on every poll.
 INTRADAY_LOOKBACK_DAYS = _env_int("INTRADAY_LOOKBACK_DAYS", 7)
 
 
 # -----------------------------------------------------------------------------
-# DhanHQ wire identifiers (rarely tuned; exposed for completeness)
+# Legacy resolver identities (rarely tuned; exposed for completeness)
 # -----------------------------------------------------------------------------
-# Change these only if you swap underlying (e.g. BANKNIFTY) or DhanHQ
-# changes its segment naming. Reference:
-#   https://dhanhq.co/docs/v2/annexure/
+# The Fyers adapter maps these existing resolver identities to Fyers symbols.
 NIFTY_INDEX_SECURITY_ID = _env_int("NIFTY_INDEX_SECURITY_ID", 13)
 NIFTY_INDEX_EXCHANGE_SEGMENT = _env_str("NIFTY_INDEX_EXCHANGE_SEGMENT", "IDX_I")
 NIFTY_INDEX_INSTRUMENT_TYPE = _env_str("NIFTY_INDEX_INSTRUMENT_TYPE", "INDEX")
-# BankNIFTY index identity (DhanHQ security_id 25 on the IDX_I segment). Only the
+# BankNIFTY index identity (legacy security_id 25 on the IDX_I segment). Only the
 # optional SL Hunting AI Agent uses these today, to fetch BankNIFTY 1-min OHLC for
 # its NF/BNF cross-confirmation (the same fetch_index_1m_ohlc path the fetcher and
 # CPR Algo 3 use). Env-overridable like the NIFTY constants above.
@@ -769,9 +710,7 @@ BANKNIFTY_INDEX_SECURITY_ID = _env_int("BANKNIFTY_INDEX_SECURITY_ID", 25)
 BANKNIFTY_INDEX_EXCHANGE_SEGMENT = _env_str("BANKNIFTY_INDEX_EXCHANGE_SEGMENT", "IDX_I")
 BANKNIFTY_INDEX_INSTRUMENT_TYPE = _env_str("BANKNIFTY_INDEX_INSTRUMENT_TYPE", "INDEX")
 OPTION_EXCHANGE_SEGMENT = _env_str("OPTION_EXCHANGE_SEGMENT", "NSE_FNO")
-# Instrument type for index OPTIONS in DhanHQ's intraday/historical APIs. Used to
-# pull 1-minute OHLC for a specific option strike (e.g. CPR Algo 3's observation
-# legs), exactly like the index fetch but on the NSE_FNO segment.
+# Retained for contract metadata and legacy Dhan execution integrations.
 OPTION_INSTRUMENT_TYPE = _env_str("OPTION_INSTRUMENT_TYPE", "OPTIDX")
 
 # NIFTY listed strikes step in 50-point increments. The ATM rule rounds the
@@ -1188,7 +1127,7 @@ DELTA20_EXIT_MULTIPLIER = _env_float("DELTA20_EXIT_MULTIPLIER", 3.0)
 DELTA20_HEDGE_STRIKES_OTM = _env_int("DELTA20_HEDGE_STRIKES_OTM", 4)
 
 # Backoff between retries when the 09:20 reference capture fails (e.g. the
-# DhanHQ option_chain endpoint is rate-limited or returns an empty payload).
+# Fyers option-chain endpoint is unavailable or returns an empty payload).
 DELTA20_CAPTURE_RETRY_SECONDS = _env_int("DELTA20_CAPTURE_RETRY_SECONDS", 5)
 
 
@@ -1290,12 +1229,10 @@ def setup_logging() -> logging.Logger:
     # logging would otherwise append after all filters have run -- is scrubbed
     # on its way to the console and the append-mode log file.
     #
-    # This is not belt-and-braces. dhanhq's marketfeed builds its websocket URL
-    # as `wss://api-feed.dhan.co?version=2&token=<ACCESS_TOKEN>&clientId=...`,
-    # so a connection exception can carry the LIVE trading token in its text,
-    # and this file's log is routinely shared when diagnosing a session. Rather
-    # than redact the handful of call sites that happen to log such an
-    # exception today, the guard covers every call site that will ever exist.
+    # Provider SDK exceptions can contain credential values, and this log is
+    # routinely shared when diagnosing a session. The handler-level guard
+    # covers every call site rather than relying on individual callers to
+    # redact exceptions consistently.
     install_redaction_filter(configured_logger, environment_secrets(os.environ))
     return logging.getLogger(LOGGER_NAME)
 
@@ -2263,7 +2200,7 @@ class OptionSubscription:
 
     Workers register a leg right after entering a paper trade and unregister
     it on exit. The fetcher reads the subscription set every poll and includes
-    those security_ids in its batched ticker_data call so all live MTM/exit
+    those security_ids in its batched quote calls so all live MTM/exit
     pricing stays current.
     """
 
@@ -2938,7 +2875,7 @@ def resample_ohlc_from_1m(ohlc: pd.DataFrame, timeframe_minutes: int) -> pd.Data
 # =============================================================================
 # DHAN BROKER CLIENT WRAPPER
 # =============================================================================
-class DhanBrokerClient:
+class _LegacyDhanMarketDataClient:
     """
     Thin wrapper around the DhanHQ Python SDK.
 
@@ -3094,7 +3031,7 @@ class DhanBrokerClient:
         """
         Fetch the live option chain (with Greeks) for one underlying expiry.
 
-        DhanHQ's `/optionchain` endpoint returns LTP, IV, OI, and per-leg
+        Fyers' `/optionchain` endpoint returns LTP, IV, OI, and per-leg
         Greeks (delta, gamma, theta, vega) for every listed strike. The
         Delta-0.2 Hedged Spread strategy uses this ONCE at 09:20 to pick
         its monitored CE/PE strikes; thereafter it relies on the cheaper
@@ -3163,6 +3100,11 @@ class DhanBrokerClient:
         if isinstance(resp, dict) and isinstance(resp.get("data"), dict):
             return resp["data"]
         return resp
+
+
+# All workers use this data-client contract; Dhan remains available only as an
+# order-execution adapter selected through LIVE_BROKER.
+MarketDataClient = FyersMarketDataClient
 
 
 # =============================================================================
@@ -3819,7 +3761,7 @@ class OptionsContractResolver:
         Return the option-chain row for an exact (expiry, strike, right) tuple.
 
         Why this helper exists:
-        - DhanHQ's live option_chain endpoint reports per-strike Greeks
+        - Fyers' live option-chain endpoint reports per-strike Greeks
           but does NOT include our broker-side `security_id`.
         - To place a paper trade (or subscribe to LTP updates) we need
           the security_id from the instrument-master CSV.
@@ -3968,7 +3910,7 @@ class CentralMarketDataFetcher(threading.Thread):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: FyersMarketDataClient,
     ):
         super().__init__(name="MarketDataFetcher", daemon=True)
         self.store = store
@@ -3981,7 +3923,7 @@ class CentralMarketDataFetcher(threading.Thread):
     def fetch_ohlc(self, timeframe: str) -> pd.DataFrame:
         """Fetch 1-min NIFTY spot OHLC. Higher TFs are derived per-worker."""
         if str(timeframe) != "1":
-            raise ValueError(f"Unsupported source timeframe for dhanhq fetcher: {timeframe}")
+            raise ValueError(f"Unsupported source timeframe for Fyers fetcher: {timeframe}")
         return self.broker.fetch_index_1m_ohlc(
             security_id=NIFTY_INDEX_SECURITY_ID,
             exchange_segment=NIFTY_INDEX_EXCHANGE_SEGMENT,
@@ -3991,7 +3933,7 @@ class CentralMarketDataFetcher(threading.Thread):
     def refresh_index_and_option_ltps(self) -> set[tuple[str, int]]:
         """
         Refresh the NIFTY spot LTP plus every subscribed option LTP in a
-        single batched ticker_data call.
+        single batched quote refresh.
         """
         subscriptions = self.store.snapshot_option_subscriptions()
         securities: dict[str, list[int]] = {
@@ -4030,7 +3972,7 @@ class CentralMarketDataFetcher(threading.Thread):
         return required_keys
 
     def run(self) -> None:
-        self.log.info("Starting central market data fetcher (dhanhq backend).")
+        self.log.info("Starting central market data fetcher (Fyers REST backend).")
         self.store.begin_market_data_monitoring()
         while not self.stop_event.is_set():
             ohlc_ok = True
@@ -4039,7 +3981,7 @@ class CentralMarketDataFetcher(threading.Thread):
                     break
                 try:
                     # The request-start time, not the response arrival time,
-                    # decides whether Dhan's final row was still forming.
+                    # decides whether Fyers' final row was still forming.
                     request_started_at = _ist_now()
                     frame = self.fetch_ohlc(timeframe)
                     validated = validate_ohlc_frame(frame)
@@ -4088,8 +4030,8 @@ class CentralMarketDataFetcher(threading.Thread):
 class WebSocketMarketDataFetcher(threading.Thread):
     """
     Producer thread: builds the same 1-minute frames and LTP cache as
-    `CentralMarketDataFetcher`, but from Dhan marketfeed websocket ticks
-    (MARKET_DATA_SOURCE=WEBSOCKET; needs the paid Data API subscription).
+    `CentralMarketDataFetcher`, but from Fyers websocket ticks
+    (MARKET_DATA_SOURCE=WEBSOCKET).
 
     Two threads cooperate inside this producer:
 
@@ -4100,7 +4042,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
       from REST once per minute, and records market-data health on the same
       FETCH_POLL_SECONDS cadence as the REST producer.
     * The PUMP is an inner daemon thread that owns the websocket: it builds a
-      FRESH `MarketFeed` per connection attempt (see `make_market_feed`),
+      FRESH Fyers data socket per connection attempt (see `make_market_feed`),
       then loops `get_data()`, feeding every price tick into the LTP cache
       and every live NIFTY index tick into the `TickBarAggregator`. On any
       socket error it reconnects with exponential backoff, re-subscribing
@@ -4136,7 +4078,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: FyersMarketDataClient,
     ):
         # Same thread name as the REST producer so logs/joins stay uniform.
         super().__init__(name="MarketDataFetcher", daemon=True)
@@ -4157,7 +4099,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
 
         # Connection state shared between pump and supervisor.
         self._feed_lock = threading.Lock()
-        self._feed: MarketFeed | None = None
+        self._feed: FyersMarketFeed | None = None
         self._subscribed_keys: set[tuple[str, int]] = set()
         self._confirmed_keys: set[tuple[str, int]] = set()
         self._last_packet_monotonic: float | None = None
@@ -4185,7 +4127,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
     # Supervisor side
     # ------------------------------------------------------------------
     def run(self) -> None:
-        self.log.info("Starting websocket market data fetcher (dhanhq marketfeed backend).")
+        self.log.info("Starting websocket market data fetcher (Fyers marketfeed backend).")
         self.store.begin_market_data_monitoring()
         if not self._warmup_official_history():
             self.log.info("Websocket market data fetcher stopped before warmup completed.")
@@ -4195,7 +4137,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
         )
         pump.start()
         # The true-up makes a BLOCKING REST call, so it gets its own thread.
-        # Keeping it on the supervisor meant one slow Dhan response stalled
+        # Keeping it on the supervisor meant one slow market-data response stalled
         # publishing, subscription syncing AND health recording together.
         trueup = threading.Thread(
             target=self._trueup_main, name="MarketDataTrueUp", daemon=True
@@ -4282,15 +4224,15 @@ class WebSocketMarketDataFetcher(threading.Thread):
                 self.stop_event.wait(self.WARMUP_RETRY_SECONDS)
         return False
 
-    def _desired_instruments(self) -> dict[tuple[str, int], tuple[int, str, int]]:
+    def _desired_instruments(self) -> dict[tuple[str, int], tuple[str, str]]:
         """
         The full instrument set the feed should carry right now:
         the NIFTY spot index plus every worker-registered option leg, as
-        ``{(segment, sec_id): (feed_code, "sec_id", Ticker)}``. Legs on a
-        segment the marketfeed cannot carry are skipped (logged once); the
-        worker-side one-shot REST fallback still prices them.
+        ``{(segment, sec_id): (segment, "sec_id")}``. Contracts without a
+        Fyers symbol mapping are skipped (logged once); the worker-side
+        one-shot REST fallback still prices them.
         """
-        desired: dict[tuple[str, int], tuple[int, str, int]] = {}
+        desired: dict[tuple[str, int], tuple[str, str]] = {}
         candidates: list[tuple[str, int]] = [
             (NIFTY_INDEX_EXCHANGE_SEGMENT, NIFTY_INDEX_SECURITY_ID)
         ]
@@ -4299,22 +4241,29 @@ class WebSocketMarketDataFetcher(threading.Thread):
             for sub in self.store.snapshot_option_subscriptions()
         )
         for segment, security_id in candidates:
-            feed_code = SEGMENT_NAME_TO_FEED_CODE.get(segment)
-            if feed_code is None:
+            if segment not in RUNNER_SEGMENT_CODES:
                 if segment not in self._warned_unknown_segments:
                     self._warned_unknown_segments.add(segment)
                     self.log.warning(
-                        "Segment %s has no marketfeed code; leg %s stays on the "
+                        "Segment %s is unsupported by Fyers market data; leg %s "
+                        "stays on the worker-side REST fallback.",
+                        segment,
+                        security_id,
+                    )
+                continue
+            try:
+                self.broker._symbol_for_identity(segment, security_id)
+            except KeyError:
+                if segment not in self._warned_unknown_segments:
+                    self._warned_unknown_segments.add(segment)
+                    self.log.warning(
+                        "Segment %s has no Fyers symbol mapping; leg %s stays on the "
                         "worker-side REST fallback.",
                         segment,
                         security_id,
                     )
                 continue
-            desired[(segment, security_id)] = (
-                feed_code,
-                str(security_id),
-                MarketFeed.Ticker,
-            )
+            desired[(segment, security_id)] = (segment, str(security_id))
         return desired
 
     def _sync_subscriptions(self) -> None:
@@ -4337,9 +4286,8 @@ class WebSocketMarketDataFetcher(threading.Thread):
             if to_remove_keys:
                 feed.unsubscribe_symbols(
                     [
-                        (SEGMENT_NAME_TO_FEED_CODE[segment], str(sec_id), MarketFeed.Ticker)
+                        (segment, str(sec_id))
                         for segment, sec_id in sorted(to_remove_keys)
-                        if segment in SEGMENT_NAME_TO_FEED_CODE
                     ]
                 )
         except Exception as exc:
@@ -4422,7 +4370,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
         Run the per-minute REST true-up when due.
 
         Scheduled once per wall minute, WS_TRUEUP_DELAY_SECONDS past the
-        rollover (Dhan's official candle for the just-closed minute lags a
+        rollover (Fyers' official candle for the just-closed minute lags a
         few seconds), and only while ticks are actually arriving -- overnight
         the aggregator is idle, so no REST calls are wasted. A requested
         true-up (reconnect gap-backfill) bypasses the schedule.
@@ -4609,9 +4557,8 @@ class WebSocketMarketDataFetcher(threading.Thread):
                     )
             finally:
                 # Release the dead connection before building the next one.
-                # Each MarketFeed binds its OWN asyncio event loop, so simply
-                # dropping the reference orphans that loop and its socket; a
-                # long session of reconnects would accumulate kernel handles.
+                # Release each socket before reconnecting so a long session
+                # cannot accumulate stale connections.
                 with self._feed_lock:
                     dead, self._feed = self._feed, None
                 if dead is not None:
@@ -4637,9 +4584,8 @@ class WebSocketMarketDataFetcher(threading.Thread):
         Process one raw `get_data()` payload.
 
         Every price tick refreshes the LTP cache (index and option legs
-        alike). Only live, in-session NIFTY index ticks become bars -- the
-        stale snapshot Dhan replays on subscribe and after-hours index
-        recomputations are cached as LTPs but never turned into candles.
+        alike). Only live, in-session NIFTY index ticks become bars; stale
+        snapshots and after-hours index updates never become candles.
         """
         now_monotonic = time.monotonic()
         if now_ist is None:
@@ -4739,7 +4685,7 @@ class BasePaperStrategyWorker(threading.Thread):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(name=f"{self.strategy_name}Thread", daemon=True)
         self.store = store
@@ -7030,7 +6976,7 @@ class BasePaperStrategyWorker(threading.Thread):
 # `MarketFeed.Ticker` only and `tick_bar_builder.py` drops depth packets, so
 # there is no bid/ask in the tick path. It comes from the `/optionchain` REST
 # response, which carries `top_bid_price` / `top_ask_price` (plus quantities)
-# per CE/PE node. `DhanBrokerClient.fetch_option_chain` has always returned that
+# per CE/PE node. `MarketDataClient.fetch_option_chain` returns that
 # payload; until now the runner parsed only OI and Greeks out of it and dropped
 # the rest.
 #
@@ -7049,11 +6995,9 @@ _DEFAULT_MIN_LIQUIDITY_SCORE = {
     "REGIME_ADAPTIVE": 30.0,
 }
 
-# Dhan allows one unique /optionchain request per 3 seconds per
-# (underlying, expiry). Entries are rare, but two workers deciding in the same
-# second on the same expiry would collide, so one short shared cache serves
-# them all. This is a rate-limit guard, not a performance cache -- the TTL is
-# deliberately the smallest value the API permits.
+# Coalesce option-chain requests for the same (underlying, expiry). Entries
+# are rare, but two workers deciding together can otherwise duplicate a call.
+# Keep the cache short so spreads and Greeks do not become unnecessarily stale.
 OPTION_CHAIN_QUOTE_CACHE_SECONDS = _env_float("OPTION_CHAIN_QUOTE_CACHE_SECONDS", 3.0)
 _option_chain_quote_cache: dict[tuple[int, str], tuple[float, dict]] = {}
 _option_chain_quote_lock = threading.Lock()
@@ -7062,8 +7006,8 @@ _option_chain_quote_lock = threading.Lock()
 def _extract_quote_from_chain_node(node: object) -> tuple[float, float]:
     """Pull ``(bid, ask)`` out of ONE CE/PE node of a `/optionchain` response.
 
-    Dhan documents `top_bid_price` / `top_ask_price`, but the SDK has shifted
-    key casing between minor releases before (see `_parse_option_chain_for_oi`),
+    The adapter normalizes bid/ask fields, and this accepts alternate names
+    used by the existing strategy parsers,
     so this accepts the same alternates the upstream project accepts and falls
     back to the first level of the depth ladder. Anything unusable returns
     ``(0.0, 0.0)`` rather than raising -- the caller treats that as "no quote",
@@ -8060,7 +8004,7 @@ class RenkoStrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = RENKO_LOGIC.RenkoSignalEngine()
@@ -8165,7 +8109,7 @@ class EMATrendStrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = EMA_LOGIC.EMATrendSignalEngine(EMA_STRATEGY_CONFIG)
@@ -8252,7 +8196,7 @@ class HeikinAshiStrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = HEIKIN_LOGIC.HeikinAshiSignalEngine()
@@ -8344,7 +8288,7 @@ class ProfitShooterStrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = PROFIT_SHOOTER_LOGIC.ProfitShooterSignalEngine(PROFIT_SHOOTER_STRATEGY_CONFIG)
@@ -8484,7 +8428,7 @@ class NextOpenAtmStrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ) -> None:
         super().__init__(store, stop_event, broker)
         self._pending_next_open: PendingNextOpenEntry | None = None
@@ -8634,7 +8578,7 @@ class GoldmineStrategyWorker(NextOpenAtmStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = GOLDMINE_LOGIC.GoldmineSignalEngine(GOLDMINE_STRATEGY_CONFIG)
@@ -8775,7 +8719,7 @@ class MoneyMachineStrategyWorker(NextOpenAtmStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = MONEY_MACHINE_LOGIC.MoneyMachineSignalEngine(MONEY_MACHINE_STRATEGY_CONFIG)
@@ -8931,8 +8875,8 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
     THIS worker ALSO needs live option-chain data, because the PCR signal
     is what the engine actually keys off. So we:
 
-    - Call `broker.fetch_option_chain` every ~30 seconds (rate-limited so
-      we never exceed DhanHQ's per-second budget for that endpoint).
+    - Call `broker.fetch_option_chain` no more often than the configured
+      refresh interval; concurrent workers share the short-lived response cache.
     - Snapshot OI per strike on the FIRST successful fetch of the session
       and treat that as our "baseline". Every later fetch computes the
       OI CHANGE as `current_oi - baseline_oi`. This is the intraday
@@ -9049,7 +8993,7 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         # Standard worker plumbing: shared data store, the supervisor's
         # stop-event for Ctrl+C handling, and the authenticated broker
@@ -9196,14 +9140,13 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
     @staticmethod
     def _parse_option_chain_for_oi(resp) -> dict:
         """
-        Flatten DhanHQ's `/optionchain` response into one tidy dict keyed
+        Flatten the normalized `/optionchain` response into one tidy dict keyed
         by strike. Output shape:
 
             {22000.0: {"ce_oi": 12345.0, "pe_oi": 67890.0}, ...}
 
-        The DhanHQ wire format is verbose (`{"status": ..., "data":
-        {"oc": {"22000.000000": {"ce": {...}, "pe": {...}}}}}`) and the
-        SDK has historically shifted casing between minor releases. This
+        The adapter returns a normalized shape (`{"status": ..., "data":
+        {"oc": {"22000.000000": {"ce": {...}, "pe": {...}}}}}`). This
         parser is intentionally defensive: anything that doesn't look
         like a `dict` at each nesting level is skipped silently rather
         than raising, so a single malformed strike never poisons the
@@ -9221,7 +9164,7 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
         if not isinstance(resp, dict):
             return {}
 
-        # DhanHQ sets `status="success"` on a good response. Anything
+        # The adapter sets `status="success"` on a good response. Anything
         # else (e.g. "failure" / "error") means the API rejected us;
         # treat it like an empty payload.
         status = str(resp.get("status", "")).strip().lower()
@@ -9232,8 +9175,7 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
         if not isinstance(payload, dict):
             return {}
 
-        # The strike map lives under the `oc` key (DhanHQ's shorthand
-        # for "option chain"). We accept the all-caps variant too just
+        # The strike map lives under the `oc` key. We accept the all-caps variant too just
         # in case a future SDK update changes the casing.
         oc = payload.get("oc") or payload.get("OC") or {}
         if not isinstance(oc, dict):
@@ -9254,8 +9196,7 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
                 continue
 
             # Pull CE OI then PE OI. We try a couple of casing variants
-            # for each side -- some DhanHQ versions return "ce"/"pe",
-            # some return "CE"/"PE", and occasionally "Ce"/"Pe".
+            # for each side to keep the normalized provider contract tolerant.
             record: dict[str, float] = {}
             for right_label, leg_keys in (
                 ("ce", ("ce", "CE", "Ce")),
@@ -9295,11 +9236,10 @@ class OpeningStrikePCRVWAPATRWorker(AtmSingleLegStrategyWorker):
         these around the opening strike to get its PCR number.
 
         CACHING / RATE LIMITING:
-        DhanHQ's option_chain endpoint is one of the tighter rate-limited
-        APIs (~1 request/sec budget). We hold a cached copy and only
+        We hold a cached copy and only
         re-fetch when more than OPENING_STRIKE_OPTION_CHAIN_REFRESH_SECONDS
         have elapsed since the last successful fetch. That way the run
-        loop can poll quickly without blowing through the API budget.
+        loop can poll quickly without making redundant provider requests.
 
         ERROR HANDLING:
         If the fetch fails (network error, rate limit, empty response),
@@ -9617,7 +9557,7 @@ class CPRStrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.signal_engine = CPR_LOGIC.CPRSignalEngine(CPR_STRATEGY_CONFIG)
@@ -9736,7 +9676,7 @@ class CPRAlgo3StrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         self.config = CPR_ALGO3_CONFIG
@@ -9954,7 +9894,7 @@ class CPRAlgo4StrategyWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
         *,
         config: Any = None,
     ) -> None:
@@ -10624,7 +10564,7 @@ class CPRAIWorker(AtmSingleLegStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
         *,
         agent=None,
         decision_logger=None,
@@ -11454,7 +11394,7 @@ class SupertrendBullishWorker(BasePaperStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         # Two-leg position shape replaces the default single-leg PaperPosition.
@@ -12130,7 +12070,7 @@ class DonchianBearishWorker(BasePaperStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         # Two-leg shape replaces the default single-leg PaperPosition.
@@ -12941,9 +12881,8 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
       and `self.pe_pos`. The base risk handlers are overridden to operate
       on both rather than on the unused `self.pos`.
     - Reference capture uses an absolute backoff timer instead of relying
-      on the poll cadence, because DhanHQ's `/optionchain` endpoint has
-      a tighter rate-limit than the LTP batch and we should not hammer
-      it on every 2-second poll.
+      on the poll cadence, because option-chain requests should not be
+      repeated unnecessarily on every 2-second poll.
     - Each side's max_loss is shared, not per-side. The user said
       "5000 per lot for the strategy", so we treat both sides as a
       single risk pool: if the COMBINED PnL breaches the limit, we shut
@@ -12964,7 +12903,7 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
 
@@ -13199,7 +13138,7 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
 
                 # 4. Reference capture. The first time we run this branch
                 #    we may need a few attempts (backoff-throttled) before
-                #    DhanHQ returns a usable option chain. On success the
+                #    Fyers returns a usable option chain. On success the
                 #    flag flips True and this branch is skipped forever.
                 if not self.reference_captured:
                     self._maybe_capture_reference()
@@ -13242,10 +13181,10 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
         """
         Backoff-throttled wrapper around `_capture_reference`.
 
-        Why throttle? DhanHQ's `/optionchain` endpoint has a tighter
-        rate-limit than the LTP batch endpoint. The worker poll cadence
-        (~2 seconds) would exceed that limit if we called option_chain
-        on every poll. By keeping a `last_capture_attempt_at` timestamp
+        Why throttle? The option-chain call is more expensive than a cached
+        LTP lookup. The worker poll cadence (~2 seconds) would duplicate
+        requests if we called it on every poll. By keeping a
+        `last_capture_attempt_at` timestamp
         and a `capture_backoff` (default 5s), we ensure at most one
         attempt per backoff window.
 
@@ -13273,7 +13212,7 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
             1. Resolve the current-week expiry (Friday-of-this-week
                typically; the helper picks the FIRST listed expiry on
                or after today).
-            2. Call DhanHQ `/optionchain` for that expiry.
+            2. Call the market-data provider's `/optionchain` for that expiry.
             3. Flatten the response into {strike: {ce/pe: {delta, ltp}}}.
             4. Pick the CE strike with delta closest to +0.20 and the
                PE strike with delta closest to -0.20.
@@ -13435,7 +13374,7 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
     @staticmethod
     def _parse_option_chain_for_deltas(resp) -> dict:
         """
-        Flatten DhanHQ's `/optionchain` payload to a simple dict shape.
+        Flatten the normalized `/optionchain` payload to a simple dict shape.
 
         Output shape:
             {
@@ -13460,9 +13399,9 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
               }
             }
 
-        Defensive parsing because the DhanHQ wire format is occasionally
-        loose (mixed case keys, nested data wrappers, missing greeks
-        sub-dict, illiquid strikes with zero LTP, etc.). Strikes whose
+        Defensive parsing because provider payloads can be incomplete
+        (mixed case keys, missing Greeks, illiquid strikes with zero LTP,
+        etc.). Strikes whose
         CE or PE is missing entirely (or has zero LTP) are dropped on
         the corresponding side, so the caller only sees liquid
         candidates and never picks a "20-delta" strike that has no
@@ -13479,8 +13418,7 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
         payload = resp.get("data")
         if not isinstance(payload, dict):
             return {}
-        # The strike map is keyed under "oc" (DhanHQ shorthand for
-        # "option chain"). We accept the all-caps form too just in case.
+        # The strike map is keyed under "oc". We accept the all-caps form too.
         oc = payload.get("oc") or payload.get("OC") or {}
         if not isinstance(oc, dict):
             return {}
@@ -13489,16 +13427,15 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
         for strike_str, leg_map in oc.items():
             if not isinstance(leg_map, dict):
                 continue
-            # DhanHQ keys strikes as strings like "22000.000000". Convert
+            # Strike keys are strings like "22000.000000". Convert
             # to float so the picker can do numeric comparisons.
             try:
                 strike = float(strike_str)
             except (TypeError, ValueError):
                 continue
 
-            # Process CE and PE legs separately. We accept the most
-            # likely casing variants for robustness against minor wire
-            # changes between DhanHQ versions.
+            # Process CE and PE legs separately, accepting common casing
+            # variants used by the normalized shape.
             record: dict = {}
             for right_label, leg_keys in (
                 ("ce", ("ce", "CE", "Ce")),
@@ -13515,7 +13452,7 @@ class Delta20HedgedSpreadWorker(BasePaperStrategyWorker):
                 greeks = leg.get("greeks")
                 if not isinstance(greeks, dict):
                     greeks = {}
-                # DhanHQ sometimes uses "last_price" and sometimes "ltp".
+                # The normalized shape prefers "last_price" but accepts "ltp".
                 # We prefer the former and fall back to the latter.
                 ltp = _safe_float(
                     leg.get("last_price")
@@ -14305,7 +14242,7 @@ class LongStrangleWorker(BasePaperStrategyWorker):
         self,
         store: SharedMarketDataStore,
         stop_event: threading.Event,
-        broker: DhanBrokerClient,
+        broker: MarketDataClient,
     ):
         super().__init__(store, stop_event, broker)
         # Two independent single-leg BUY positions. The base self.pos stays
@@ -19825,30 +19762,24 @@ def main() -> None:
     )
     os.chdir(ROOT_DIR)
 
-    # Credentials must come from `.env` (or the shell env). We never carry
-    # in-code defaults for these because they are secrets.
-    if not CLIENT_CODE or not ACCESS_TOKEN:
+    if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
         raise ValueError(
-            "DHAN_CLIENT_CODE and DHAN_ACCESS_TOKEN must be set in "
-            "Multithreading/Dependencies/.env. If you have an API Key + "
-            "API Secret but no access token yet, run:\n"
-            "    python Multithreading/Dependencies/dhan_token_setup.py"
+            "FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN must be set in "
+            "Dependencies/.env. Generate an access token in the Fyers API "
+            "dashboard, then store it locally in that file."
         )
 
-    # Fail fast if the access token is invalid / expired. The user_profile
-    # endpoint is cheap and gives us a clear early error instead of a
-    # confusing failure inside an OHLC fetch later.
-    try:
-        DhanLogin(CLIENT_CODE).user_profile(ACCESS_TOKEN)
-    except Exception as exc:
-        raise ValueError(
-            "DHAN_ACCESS_TOKEN failed validation against /v2/profile: "
-            f"{exc}\nIf the token has expired, regenerate it with:\n"
-            "    python Multithreading/Dependencies/dhan_token_setup.py"
-        ) from exc
+    broker = FyersMarketDataClient(
+        FYERS_CLIENT_ID,
+        FYERS_ACCESS_TOKEN,
+        INSTRUMENT_MASTER_GLOB,
+        ROOT_DIR / "Dependencies" / "fyers_nse_fo.csv",
+        request_timeout_seconds=MARKET_DATA_HTTP_TIMEOUT_SECONDS,
+    )
+    broker.validate_session()
 
     logger.info(
-        "Starting NIFTY Multi Strategy MASTER paper runner (dhanhq) | "
+        "Starting NIFTY Multi Strategy MASTER paper runner (Fyers market data) | "
         "ATM single-leg family (24): 10 core - Renko 1m, EMA 5m, HeikinAshi 1m, "
         "ProfitShooter 5m, Goldmine 5m, MoneyMachine 5m, OpeningStrike 5m "
         "PCR/VWAP/ATR, CPR 5m, CPR Algo 3 5m (multi-instrument), CPR Algo 4 5m (SRSI/VWAP); "
@@ -19863,18 +19794,17 @@ def main() -> None:
         SIGNAL_GEN_WORKERS[0].derived_timeframe_minutes,
     )
 
-    broker = DhanBrokerClient(CLIENT_CODE, ACCESS_TOKEN)
     store = SharedMarketDataStore()
     stop_event = threading.Event()
 
     # One producer (fetcher) serves the approximately 28 core consumers plus
     # independently opt-in SL Hunting and CPR Codex AI agents. Per-strategy
     # virtual gates determine the final consumer set. The producer class comes from
-    # MARKET_DATA_SOURCE: REST polling (default) or the Dhan websocket feed;
+    # MARKET_DATA_SOURCE: REST polling (default) or the Fyers websocket feed;
     # unknown values fail closed to REST inside the selector.
     fetcher_cls = _select_market_data_fetcher_class()
     logger.info(
-        "Market data source: %s -> %s", MARKET_DATA_SOURCE, fetcher_cls.__name__
+        "Market data provider: Fyers | source: %s -> %s", MARKET_DATA_SOURCE, fetcher_cls.__name__
     )
     fetcher = fetcher_cls(store, stop_event, broker)
 

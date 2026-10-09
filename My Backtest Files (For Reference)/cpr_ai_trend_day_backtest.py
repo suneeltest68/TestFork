@@ -10,10 +10,10 @@ Beginner flow:
    baseline in which Codex accepts every candidate; live, Codex may veto.
 3. Enter a couple of minutes after the bar closes (the model needs time),
    hold until the spot touches the VWAP stop or 15:15, and never re-enter.
-4. Price the trade on REAL option premiums when the expired-options folder
-   (`python algo.py fetch-expired-options`) is present: SELL the opposite ATM
-   option (the live expression) and, for comparison, BUY the directional one.
-   Without that folder the script reports NIFTY spot points only.
+4. Price the trade on REAL option premiums when the previously generated
+   expired-options folder is present: SELL the opposite ATM option (the live
+   expression) and, for comparison, BUY the directional one. Without those
+   local files the script reports NIFTY spot points only.
 
 Fill assumptions:
 - entry spot and premium are the close of the minute `--entry-delay` minutes

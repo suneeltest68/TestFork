@@ -226,9 +226,9 @@ The deterministic baseline:
 python algo.py backtest --strategy cpr-ai-trend-day
 ```
 
-It needs `Backtest Outputs/nifty_renko_futures_5y_1min_data.csv`. With
-`Backtest Outputs/expired_options/nifty` (from `python algo.py fetch-expired-options`) it prices the
-sold leg on real premiums; without it, it reports spot points.
+It needs `Backtest Outputs/nifty_renko_futures_5y_1min_data.csv`. If the previously generated
+`Backtest Outputs/expired_options/nifty` dataset is already available, it prices the sold leg on
+real premiums; without it, it reports spot points. The expired-options downloader has been retired.
 
 ---
 

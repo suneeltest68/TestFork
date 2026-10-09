@@ -4,7 +4,8 @@
 # DEPS-001: the LIVE RUNTIME block below is pinned to the exact versions
 # verified together on the live runner (pip freeze, 2026-07-07). This is
 # live-money code — a reinstall must never silently pick up a new
-# pandas/dhanhq mid-week. Bump these deliberately in a dependency-maintenance
+# pandas or broker SDK mid-week. DhanHQ remains only for Dhan order execution;
+# Fyers supplies market data and index history. Bump these deliberately in a dependency-maintenance
 # PR and re-run the full gate suite (CI installs this file, so the gates always
 # test the pinned set).
 #
@@ -20,6 +21,7 @@
 
 # ---- LIVE RUNTIME (DEPS-001: the verified live-runner set) -------------------
 dhanhq==2.2.0
+fyers-apiv3==3.1.15
 pandas==3.0.6
 numpy==2.5.3
 backtesting==0.6.6

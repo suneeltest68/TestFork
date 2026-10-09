@@ -50,8 +50,8 @@ including typos. `_select_market_data_fetcher_class()` owns that decision.
 ```
 loop:
   sleep(poll interval, 2-5s)
-  GET intraday OHLC for the full window
-  normalize_dhan_intraday_response(resp)      # epoch-unit inference, column mapping
+  request Fyers intraday OHLC for the full window
+  normalize Fyers response to the shared OHLC schema
   validate_ohlc_frame(frame)                  # fail closed on bad geometry
   build_last_row_signature(frame)             # cheap change detection
   store.publish(frame, ltps)
@@ -60,14 +60,15 @@ loop:
 Simple, no state to recover, and every bar is by definition the official
 exchange candle. Its cost is API load: one full-window pull every few seconds.
 
-### 3.2 `WebSocketMarketDataFetcher` (opt-in, needs the paid Data API)
+### 3.2 `WebSocketMarketDataFetcher` (opt-in)
 
 Two cooperating pieces:
 
 ```
   pump thread                  supervisor
   ───────────                  ──────────
-  dhanhq.marketfeed packets ─► tick_bar_builder (pure helpers)
+  Fyers symbol updates ──────► Fyers adapter normalizes runner packet shape
+                                  └─► tick_bar_builder (pure helpers)
                                  ├─ update the FORMING minute in real time
                                  ├─ close the minute at the boundary
                                  └─ update LTP per leg
@@ -78,6 +79,10 @@ Two cooperating pieces:
                                on connect / reconnect:
                                  REST warmup + gap backfill
 ```
+
+Both producer modes use Fyers for live market data. The adapter maps runner
+contract identities to Fyers symbols and normalizes provider responses; Dhan
+remains a separately selectable order-execution broker.
 
 Legs are subscribed and unsubscribed dynamically as workers enter and exit
 positions — including multi-leg baskets (hedged pairs, the Delta-0.2 four-leg
@@ -183,7 +188,10 @@ branch-coverage tier enforced by `scripts/check_coverage_thresholds.py`.
 
 ---
 
-## 9. Known failure modes
+## 9. Historical Dhan WebSocket incident
+
+The following incident record describes the former Dhan feed only; it is not a
+diagnosis of the current Fyers provider.
 
 ### 9.1 `did not receive a valid HTTP response`
 
@@ -271,3 +279,13 @@ backfill for the ticks missed while the socket was down. The cost is REST load
 well above what ADR-0005 assumed when it traded polling for a socket, which
 erodes the API-load saving that motivated the websocket producer. Sustained churn
 at this level is a reason to re-read that trade-off, not a data-safety concern.
+
+## 10. Fyers rollout validation
+
+The adapter and producer paths have offline test coverage, but authenticated
+Fyers REST and WebSocket behavior has not yet been smoke-tested with the
+operator's account. Before enabling live trading, verify history and quote
+responses, option-symbol/expiry mapping, timestamps, option-chain bid/ask and
+Greeks, WebSocket reconnects, and freshness handling using paper mode. If the
+WebSocket is unhealthy, set `MARKET_DATA_SOURCE=REST` and restart; there is no
+mid-session producer failover.

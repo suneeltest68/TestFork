@@ -7,17 +7,17 @@
 
 ## What this project is
 A NIFTY index-options, multi-strategy trading system. The flow is: **fetch** 1-minute OHLC history from
-the DhanHQ API → **backtest** strategies on it → **run** a multithreaded "front test" whose approximately
+the Fyers API → **backtest** strategies on it → **run** a multithreaded "front test" whose approximately
 28-strategy core roster and independently opt-in agents execute together — on paper by default, and live
 through a real broker when explicitly enabled.
 Running live since May 2026; daily per-strategy results are tracked in a Google Sheet.
 
 ## Architecture (runtime)
 One process, cooperating threads:
-- `CentralMarketDataFetcher` (one thread) polls DhanHQ and writes into a **lock-guarded
+- `CentralMarketDataFetcher` (one thread) polls Fyers and writes into a **lock-guarded
   `SharedMarketDataStore`** (1-min OHLC + LTPs). Setting `MARKET_DATA_SOURCE=WEBSOCKET`
-  (fails closed to REST on any other value; needs the paid Dhan Data API subscription)
-  swaps in `WebSocketMarketDataFetcher`: Dhan marketfeed ticks build the bars/LTPs
+  (fails closed to REST on any other value; requires valid Fyers market-data credentials)
+  swaps in `WebSocketMarketDataFetcher`: Fyers marketfeed ticks build the bars/LTPs
   (pure helpers in `Dependencies/tick_bar_builder.py`), with REST kept for warmup and a
   once-per-minute true-up against official candles.
 - **Approximately 28 core strategy worker threads** read that store and decide trades: the `AtmSingleLegStrategyWorker`
@@ -147,19 +147,17 @@ One process, cooperating threads:
 ## Repository layout
 ```
 nifty_multi_strategy_master.py   # the multithreaded paper/live runner (the "big one")
-algo.py                                             # unified CLI: fetch-data / fetch-expired-options / backtest / run / setup-token / diagnose / check-env
+algo.py                                             # unified CLI: fetch-data / backtest / run / setup-token / diagnose / check-env
 Tests/                                             # EVERY test, mirroring the source tree (docs/adr/0010)
   test_nifty_multi_strategy_master.py              #   unittest suite for the master
   test_market_data_health.py                       #   unittest suite for the shared feed-health gates
 requirements.txt                                   # exact core runtime + dev/CI tooling
 requirements-brokers.txt                           # exact Kotak/Shoonya optional live set
 requirements-ai.txt                                # exact optional AI-agent stack (Claude + Codex)
-Data Extractors/                                   # DhanHQ downloaders (shared engine + per-index wrappers)
+Data Extractors/                                   # Fyers index-history downloaders (shared engine + wrappers)
                                                    #   index 1-min OHLC, plus expired-OPTION history
-                                                   #   (premium/OI/IV) via expired_options_fetch_dhan_common.py
-                                                   #   + expiry_calendar.py -- read docs/adr/0015 first: strikes
-                                                   #   are RELATIVE (ATM+/-n), not contracts, and the expiry
-                                                   #   date is derived rather than returned by the API
+                                                   #   expired-options fetching is retired; old local CSVs
+                                                   #   remain usable as backtest inputs
 My Backtest Files (For Reference)/                 # backtesting.py backtests (+ Subhamoy Strategies/)
 Signal Generators/                                 # strategy signal logic (+ CPR Strategy/, Subhamoy Strategies/,
                                                    #   SL Hunting AI Agent/ — optional Claude-agent strategy;
@@ -171,7 +169,8 @@ Dependencies/
   dashboard_snapshot.py / dashboard_server.py      # the optional read-only dashboard: pure
   dashboard_assets/                                #   shaping, transport, and the page (+ the
                                                    #   vendored Apache-2.0 lightweight-charts)
-  dhan_token_setup.py                              # one-time DhanHQ OAuth token setup
+  fyers_market_data.py                             # Fyers REST/WebSocket adapter
+  dhan_token_setup.py                              # Dhan execution OAuth token setup
   check_env_config.py                              # `algo.py check-env` config-drift audit (read-only)
   Kotak API/     -> kotak_execution.py, diagnose_kotak_symbol.py
   Shoonya API/   -> NorenApi.py (vendored client), shoonya_execution.py, diagnose_shoonya_symbol.py
@@ -223,8 +222,8 @@ Backtest Outputs/                                  # generated CSVs/logs (gitign
   `recover_after_reconciliation`, `extract_order_id`, `logout`, `is_logged_in` — so the runner only
   touches the generic `execution_client`. The shared result types live in
   `Dependencies/broker_contract.py`. The Shoonya `NorenApi` client is vendored under
-  `Dependencies/Shoonya API/`. Dhan is the only broker whose SDK serves both market data and
-  execution, but the two sessions stay separate (`DhanBrokerClient` vs `dhan_execution_client`).
+  `Dependencies/Shoonya API/`. Fyers supplies market data; Dhan, when selected, is an independent
+  execution broker (`dhan_execution_client`).
   Two Dhan quirks the adapter exists to contain: its SDK returns `{'status':'failure',
   'remarks': str(exc)}` for *transport* errors, which is shape-identical to a real rejection — so
   `REJECTED` is never derived from the placement envelope (a `dict` `remarks` means the server
@@ -236,9 +235,7 @@ Backtest Outputs/                                  # generated CSVs/logs (gitign
 - **Credential-safe logging:** `setup_logging()` installs `install_redaction_filter` on the root
   logger with `environment_secrets(os.environ)` (every `.env` value whose KEY looks sensitive, ≥8
   chars), so **every** record — lazy `%s` args and exception tracebacks included — is scrubbed before
-  it reaches the console or the append-mode log. This matters concretely: dhanhq's marketfeed puts
-  the live access token in its websocket URL, so a connect error would otherwise write it verbatim
-  into a log operators routinely share. Do not hand-redact new call sites; the guard covers them.
+  it reaches the console or the append-mode log. Do not hand-redact new call sites; the guard covers them.
   Short values (a 4-digit MPIN) are deliberately excluded from exact-match replacement — they would
   blank strike prices and quantities — and are caught by `redact_text`'s `name=value` pass instead.
 - **Code style:** detailed, beginner-friendly module + function docstrings and plain-English inline
@@ -247,11 +244,10 @@ Backtest Outputs/                                  # generated CSVs/logs (gitign
   `logging.getLogger(__name__)` logger, **not `print()`**. Strategy FOLDERS still have spaces, so
   their modules are imported via `load_module()` (master ~L1024), not regular imports; the
   filenames themselves were renamed to identifiers by ADR-0014.
-- **CLI:** prefer `python algo.py <command>` (`fetch-data` / `fetch-expired-options` / `backtest` /
+- **CLI:** prefer `python algo.py <command>` (`fetch-data` / `backtest` /
   `run` / `setup-token` / `diagnose` / `check-env`); each underlying script still runs standalone, and
   any flag beyond the selector passes straight through. A bare `python algo.py` prints help.
-  `fetch-expired-options` is a long job (~2,700 calls for a 5-year NIFTY backfill) -- it takes
-  `--dry-run` to print the call plan first, and resumes per chunk from its `_manifest.json`.
+  Index-history downloads require `FYERS_CLIENT_ID` and `FYERS_ACCESS_TOKEN` in `Dependencies/.env`.
 - **Config drift:** `python algo.py check-env` (`Dependencies/check_env_config.py`) audits
   `Dependencies/.env` against `env.example` and against the keys the code's `_env_*` calls actually
   read, reporting settings missing from `.env` (an unseen in-code default is in force), mistyped or

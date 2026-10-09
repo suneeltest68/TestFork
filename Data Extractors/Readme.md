@@ -1,29 +1,42 @@
-# What is a data extractor?
-Data extractor extracts 1 minute historical OHLC data of your preferred index(NIFTY/BANKNIFTY/FINNIFTY) for your preferred time - like 3 months or 6 months or 1 year or even 5 years
+# Index history extractors
 
-# The use?
-If you want to implement your backtesting logics(like or unlike how I implememted my own), that data would be helpful
+These scripts download historical OHLC candles for NIFTY, BANKNIFTY, and
+FINNIFTY through the Fyers API. They preserve chunked downloads, candle
+validation, and atomic resume manifests so an interrupted run can continue
+without discarding completed history.
 
-# Files in this folder
-- `nifty_1m_5y_data_fetch_dhan.py` — NIFTY (security_id 13) wrapper.
-- `banknifty_1m_5y_data_fetch_dhan.py` — BANKNIFTY (security_id 25) wrapper.
-- `finnifty_1m_5y_data_fetch_dhan.py` — FINNIFTY (security_id 27) wrapper.
-- `index_1m_5y_data_fetch_dhan_common.py` — shared chunked-download engine. Don't run this directly; the three wrappers above call it.
+## Scripts
 
-# How to run
-Each wrapper has the index-specific defaults baked in, so this is enough:
+- `nifty_1m_5y_data_fetch_fyers.py` — NIFTY (runner identity 13).
+- `banknifty_1m_5y_data_fetch_fyers.py` — BANKNIFTY (runner identity 25).
+- `finnifty_1m_5y_data_fetch_fyers.py` — FINNIFTY (runner identity 27).
+- `index_1m_5y_data_fetch_fyers_common.py` — shared engine; call a wrapper
+  instead of running this module directly.
+
+For example:
+
+```sh
+python "Data Extractors/nifty_1m_5y_data_fetch_fyers.py" --lookback 5y
 ```
-python "Data Extractors/nifty_1m_5y_data_fetch_dhan.py"
+
+The unified CLI is also available:
+
+```sh
+python algo.py fetch-data --index nifty --interval 1 --lookback 5y
 ```
-Override anything via CLI — `--start-date`, `--end-date`, `--output`, `--client-id`, `--chunk-days`. Run with `--help` for the full list. (The access token has no CLI flag on purpose — see Credentials.)
 
-# Resuming an interrupted download
-A five-year pull is around 21 requests over about ten minutes. Each chunk is appended to the CSV as it arrives and the progress is recorded in `<output>.manifest.json`, so a run that dies partway through picks up from the last completed chunk instead of downloading everything again. Just run the same command a second time.
+Each wrapper defaults to a CSV in `Backtest Outputs/`. Use `--start-date`,
+`--end-date`, `--output`, or `--chunk-days` to customize the request. Pass
+`--help` for the full list. A sibling `.manifest.json` records completed
+chunks; rerunning the same command resumes safely. `--no-resume` forces a
+fresh atomic rebuild.
 
-The manifest is only trusted when it describes the *same* run — same start date, interval, chunk size, security id and segment. Change any of those and the download starts over, because progress from a different run would skip windows that were never actually fetched. Pass `--no-resume` to ignore the manifest deliberately and write the whole file in one atomic replace.
+## Credentials
 
-# Where the CSV lands
-By default, in `<repo_root>/Backtest Outputs/<index>_renko_futures_5y_1min_data.csv`. The folder is auto-created. Override with `--output`.
+Set `FYERS_CLIENT_ID` and `FYERS_ACCESS_TOKEN` in `Dependencies/.env`. The
+access token is environment-only and has no CLI flag so it cannot land in
+shell history. Dhan credentials are not used by these extractors; they remain
+available separately for Dhan order execution.
 
-# Credentials
-Set `DHAN_CLIENT_CODE` and `DHAN_ACCESS_TOKEN` as environment variables (e.g. in `Dependencies/.env`) — `DHAN_ACCESS_TOKEN` is the key the rest of the repo uses and the one `python algo.py setup-token` writes. The older `DHAN_TOKEN_ID` is still accepted as a fallback. The client id may also be passed via `--client-id`; the access token is deliberately environment-only — a token typed on the command line would land in shell history and process listings.
+The expired-options downloader has been retired. Existing local option-history
+CSVs can still be used by backtests that consume them.

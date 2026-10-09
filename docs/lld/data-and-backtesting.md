@@ -19,17 +19,16 @@ runner's safety machinery entirely.
 
 ```
  Data Extractors/
-   index_1m_5y_data_fetch_dhan_common.py     ← the shared engine
-   nifty_1m_5y_data_fetch_dhan.py            ┐
-   banknifty_1m_5y_data_fetch_dhan.py        ├ thin per-index wrappers
-   finnifty_1m_5y_data_fetch_dhan.py         ┘
+   index_1m_5y_data_fetch_fyers_common.py     ← the shared engine
+   nifty_1m_5y_data_fetch_fyers.py            ┐
+   banknifty_1m_5y_data_fetch_fyers.py        ├ thin per-index wrappers
+   finnifty_1m_5y_data_fetch_fyers.py         ┘
 ```
 
 One engine, three wrappers. The wrappers differ only in the instrument they
 name; everything about paging, retry, epoch-unit handling and CSV writing lives
-in the common module. All four are under mypy: the wrappers were renamed to
-identifier names under [ADR-0014](../adr/0014-tiered-rename-of-spaced-filenames.md)
-and joined the type gate in the same commit.
+in the common module. Fyers credentials are read from `FYERS_CLIENT_ID` and
+`FYERS_ACCESS_TOKEN` in `Dependencies/.env`; no token is accepted on the CLI.
 
 Output lands in `Backtest Outputs/`, which is gitignored.
 
@@ -40,59 +39,26 @@ python algo.py fetch-data --index nifty --interval 5 --lookback 5y
 Any flag beyond the selector passes straight through to the underlying script,
 and each script still runs standalone.
 
-### 2.1 Epoch-unit inference
+### 2.1 Fyers history
 
-The Dhan intraday response has been observed with different epoch units.
-`_infer_epoch_unit` / `_validate_single_epoch_unit` (in the master, mirrored in
-the extractor engine) infer the unit and then **assert it is consistent across
-the response** — a frame with mixed units would otherwise produce candles
-decades apart with no obvious symptom.
+The adapter maps the runner's existing index identities (13/25/27) to Fyers'
+NIFTY, BANKNIFTY, and FINNIFTY index symbols. Fyers candle epochs are normalized
+to Asia/Kolkata before session clipping and OHLC validation. Downloads remain
+chunked, resumable, and written in the existing CSV schema.
 
-### 2.2 Expired options
+For option symbols and the existing contract resolver, the live runner still
+uses the public detailed Dhan instrument master as contract metadata. It
+downloads that file on startup when no local `Dependencies/all_instrument
+*.csv` exists; no Dhan login or market-data credentials are used.
 
-```
- Data Extractors/
-   expired_options_fetch_dhan_common.py     ← the engine
-   expiry_calendar.py                       ← pure expiry derivation
-   nifty_expired_options_fetch_dhan.py      ← thin wrapper
-```
+### 2.2 Expired-options history (retired)
 
-```bash
-python algo.py fetch-expired-options --index nifty --dry-run
-python algo.py fetch-expired-options --index nifty --lookback 5y --verify-expiries
-```
-
-Real expired NIFTY option bars — OHLC **plus volume, open interest, implied
-volatility, the actual strike and the spot** — via `POST /v2/charts/rollingoption`
-(`dhanhq.expired_options_data`). Five years, minute resolution. Output is one CSV
-per `(strike label, option type)` under
-`Backtest Outputs/expired_options/nifty/`, alongside a
-`_weekly_expiry_calendar.csv` and a `_manifest.json`.
-
-Three properties worth knowing before using it, all covered by
-[ADR-0015](../adr/0015-rolling-relative-strike-expired-options.md):
-
-- **Strikes are relative, not contracts, and re-pick every bar.** Measured: the
-  `ATM` call switched strike 69 times in one session, and a four-session `ATM`
-  file held 13 distinct contracts. Re-key on `strike_price` and `expiry_date` to
-  rebuild a fixed contract; never treat `strike_label` as an instrument.
-- **The tail of a range is dropped.** Sessions after the last expiry inside the
-  window cannot be labelled, so a backfill ending today loses the current
-  part-week. The run warns about it; extend `--end-date` past the next expiry.
-- **A session is usually 375 bars, but not always** — 20-Jan-2025 has a 15:30
-  print as well, giving 376, and the six Diwali/special sessions run 60–107.
-  Do not assume the last bar is 15:29.
-- **Volume is unreliable on expiry-day afternoons.** 26 bars in 19.4M carried a
-  corrupt negative volume, every one on an expiry day and most at 14:15; they
-  are blanked to `NA`. OHLC, OI, IV and spot on those bars are fine.
-- **±10 strikes is a ±500-point band.** A contract that drifts further from spot
-  stops appearing. Silence is missing data, not a worthless option.
-- **`expiryCode` is 1-based here** (1 = near), unlike the annexure's table for
-  `/charts/historical`. A zero is rejected as a missing field.
-
-The download is resumable per chunk: `_manifest.json` records each series' byte
-length, and a restart trims any chunk a crash left half-written before carrying
-on. Pacing goes through the shared `RollingWindowRateLimiter`.
+The Dhan-specific expired-options downloader and its CLI command have been
+removed. The pinned official Fyers v3 SDK and sample collection do not expose a
+documented equivalent. Existing local option-history CSVs remain usable by
+backtests, but this repository no longer fetches or refreshes them. The
+historical Dhan design is recorded in
+[ADR-0015](../adr/0015-rolling-relative-strike-expired-options.md).
 
 ---
 
@@ -166,13 +132,6 @@ whose size or logic changed.
 engine's construction and request-building. Its module path anchor points back
 at the **source** `Data Extractors/` folder.
 
-`test_expired_options_fetch.py` and `test_expiry_calendar.py` cover the
-expired-options engine and its calendar. Neither touches the network — the
-DhanHQ client is a `SimpleNamespace` duck. The cases that earn their keep encode
-what the API taught us: `expiryCode` being 1-based, a `str` vs `dict` `remarks`
-meaning two completely different things, the parallel-array response shape, the
-holiday roll-back, and the 01-Sep-2025 Thursday→Tuesday change.
-
 The backtests themselves are not tested — they are reference scripts, not
 runtime code. `compileall` is their only gate.
 
@@ -186,9 +145,5 @@ runtime code. `compileall` is their only gate.
   A backtest is an idea filter, not a P&L forecast. The paper-trading phase is
   what exercises the execution path.
 - **No volume** in the *index* source data, so volume-derived indicators are
-  proxies there — the same limitation the live feed has. The expired-options
-  data of §2.2 does carry real volume, OI and IV; it is the one dataset here
-  that does not need the proxy.
-- **The expired-options set has no bid/ask** either, so spread and slippage
-  still cannot be modelled from it, and its ±500-point strike band means a
-  drifted contract goes missing rather than reading as worthless (§2.2).
+  proxies there — the same limitation the live feed has. Existing option-history
+  datasets are external inputs and are no longer updated by this repository.

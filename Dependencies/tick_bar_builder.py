@@ -1,18 +1,16 @@
-"""Pure tick-to-bar helpers for the websocket (Dhan marketfeed) data producer.
+"""Pure tick-to-bar helpers for normalized WebSocket market-data packets.
 
-The multithreaded runner can source its market data from a Dhan websocket feed
-instead of REST polling (``MARKET_DATA_SOURCE=WEBSOCKET``).  In that mode a
-"pump" thread receives raw marketfeed packets and a supervisor thread turns
-them into the same 1-minute OHLC frames and LTP updates the REST producer
-publishes today.  Everything in this module is deliberately free of the
-``dhanhq`` SDK and of any network or store dependency so it can be unit-tested
-offline and audited in isolation:
+The multithreaded runner can source its market data from a Fyers WebSocket feed
+instead of REST polling (``MARKET_DATA_SOURCE=WEBSOCKET``). The Fyers adapter
+translates provider packets into the runner's established packet shape, then a
+"pump" thread and supervisor thread build the same 1-minute OHLC frames and LTP
+updates as the REST producer. Everything in this module is deliberately free of
+broker SDKs and network or store dependencies so it can be unit-tested offline:
 
 * :func:`parse_marketfeed_packet` — turn one raw ``get_data()`` payload into a
   validated :class:`TickEvent` (or ``None`` for the many non-price payloads).
-* :func:`packet_confirms_subscription` — recognise packets that prove Dhan
-  accepted a subscription (including the ``Previous Close`` snapshot replayed
-  on subscribe, which arrives even when the instrument has not traded).
+* :func:`packet_confirms_subscription` — recognise price and legacy
+  ``Previous Close`` packets that identify a subscribed instrument.
 * :func:`resolve_tick_minute` — decide which 1-minute session bucket a tick
   belongs to, rejecting the stale snapshot ticks and after-hours index
   recomputations observed on the real feed (probe run 2026-07-21).
@@ -24,10 +22,10 @@ offline and audited in isolation:
 * :func:`divergence_stats` — quantify tick-vs-official candle disagreement so
   every true-up can log how faithful the local bars were.
 
-Packet field names and ``type`` strings match dhanhq 2.2.0's ``marketfeed.py``
-(``'Ticker Data'``, ``'Quote Data'``, ``'Full Data'``, ``'Previous Close'``,
-prices serialised as ``'%.2f'`` strings, ``LTT`` as an IST ``HH:MM:SS``
-time-of-day string).
+The packet names are the runner's existing compatibility contract
+(``'Ticker Data'``, ``'Quote Data'``, ``'Full Data'``, ``'Previous Close'``).
+Prices are strings and ``LTT`` is an IST ``HH:MM:SS`` value; the Fyers adapter
+normalizes its provider-specific fields to this shape before parsing.
 """
 
 from __future__ import annotations
@@ -45,8 +43,7 @@ import pandas as pd
 # none), so tick bars do not either.
 OHLC_COLUMNS = ["timestamp", "open", "high", "low", "close"]
 
-# dhanhq 2.2.0 marketfeed exchange-segment codes <-> the segment strings used
-# throughout the runner and the instrument master.
+# Compatibility exchange-segment codes <-> runner segment strings.
 SEGMENT_CODE_TO_NAME = {0: "IDX_I", 2: "NSE_FNO", 8: "BSE_FNO"}
 SEGMENT_NAME_TO_FEED_CODE = {name: code for code, name in SEGMENT_CODE_TO_NAME.items()}
 
@@ -57,10 +54,8 @@ SESSION_END = dt_time(15, 30)
 
 # Packet ``type`` strings that carry a tradeable price (LTP)...
 _PRICE_PACKET_TYPES = frozenset({"Ticker Data", "Quote Data", "Full Data"})
-# ...and the wider set that proves Dhan accepted the subscription.  On
-# subscribe Dhan replays one Ticker snapshot plus one 'Previous Close' packet
-# per instrument (verified on the live feed 2026-07-21), so a quiet option leg
-# confirms without ever trading.
+# ...and the wider set that identifies a subscribed instrument. `Previous
+# Close` remains accepted for compatibility with the earlier provider adapter.
 _CONFIRMING_PACKET_TYPES = _PRICE_PACKET_TYPES | {"Previous Close"}
 
 
@@ -72,7 +67,7 @@ class TickEvent:
     """Runner-style exchange segment, e.g. ``"IDX_I"`` or ``"NSE_FNO"``."""
 
     security_id: int
-    """Dhan security id of the instrument that ticked."""
+    """Runner contract id of the instrument that ticked."""
 
     ltp: float
     """Last traded price, already validated finite and positive."""
@@ -113,12 +108,13 @@ def _decode_instrument(packet: dict) -> tuple[str, int] | None:
 
 
 def parse_marketfeed_packet(packet: object, now_ist: datetime) -> TickEvent | None:
-    """Decode one raw ``MarketFeed.get_data()`` payload into a tick.
+    """Decode one normalized market-feed packet into a tick.
 
     Returns ``None`` for everything that is not a well-formed price packet:
     ``None`` payloads, status strings ("Markets Open"), 'Previous Close' /
     'Market Depth' / 'OI Data' packets, unknown exchange segments, and prices
-    that are missing, non-numeric, non-finite, or not strictly positive.
+    that are missing, non-numeric, non-finite, or not strictly positive. The
+    Fyers adapter translates provider messages into this runner packet shape.
     """
 
     if not isinstance(packet, dict):
@@ -145,12 +141,11 @@ def parse_marketfeed_packet(packet: object, now_ist: datetime) -> TickEvent | No
 
 
 def packet_confirms_subscription(packet: object) -> tuple[str, int] | None:
-    """Identify packets that prove Dhan accepted an instrument subscription.
+    """Identify packets that indicate an instrument subscription is active.
 
-    Any price packet counts, and so does the 'Previous Close' snapshot Dhan
-    replays on subscribe — which is what lets a far-OTM leg that never trades
-    still confirm.  Returns the ``(segment_name, security_id)`` key the runner
-    uses, or ``None`` when the payload identifies no subscribed instrument.
+    Any price packet counts, and legacy ``Previous Close`` snapshots remain
+    accepted. Returns the ``(segment_name, security_id)`` key the runner uses,
+    or ``None`` when the payload identifies no subscribed instrument.
     """
 
     if not isinstance(packet, dict):
@@ -167,13 +162,11 @@ def resolve_tick_minute(
 ) -> pd.Timestamp | None:
     """Map a tick's ``LTT`` to the 1-minute session bucket it belongs to.
 
-    Dhan's ``LTT`` is an IST ``HH:MM:SS`` time-of-day string (verified against
-    the live feed: an option's final trade stamps 15:29:59 IST).  A tick is
+    The normalized ``LTT`` is an IST ``HH:MM:SS`` time-of-day string. A tick is
     only allowed to build bars when its LTT is BOTH:
 
-    * within ``tolerance_seconds`` of the local IST clock — this rejects the
-      stale snapshot tick Dhan replays on subscribe (which can carry the prior
-      session's timestamp), and
+    * within ``tolerance_seconds`` of the local IST clock — this rejects stale
+      snapshots carrying an earlier session's timestamp, and
     * inside the NSE session window [09:15, 15:30) — this rejects after-hours
       index recomputations (observed stamping e.g. 19:26:03).
 

@@ -120,8 +120,8 @@ an entry quoted wider than `<PREFIX>_MAX_SPREAD_PCT`.
 | Spread too wide | refuse | refuse | It is a market fact, so paper rows stay predictive. |
 | Quote unreadable | allow (warn) | **refuse** | An API failure should not cost a paper data point — but it also should not spend real money on a check that did not run. |
 
-Workers share one 3-second cache (`_fetch_option_chain_cached`) because Dhan
-allows a single option-chain request per 3 s per underlying/expiry.
+Workers share one 3-second cache (`_fetch_option_chain_cached`) to coalesce
+nearby requests for the same underlying and expiry.
 
 Default is `0` (off) for every strategy **except Regime Adaptive** (2.0), so
 introducing the gate changed no existing strategy's behaviour.
@@ -167,9 +167,9 @@ enter at the **open of the following candle**. Two rules make that safe:
 and is ≥8 characters. Every record is scrubbed before it reaches the console or
 the append-mode log, including lazy `%s` args and exception tracebacks.
 
-This is not theoretical: `dhanhq`'s marketfeed puts the live access token **in
-its websocket URL**, so a connect error would otherwise write it verbatim into a
-log operators routinely share.
+Provider SDK errors can include request or credential details. The root-handler
+redaction filter scrubs configured secret values from records and exception
+tracebacks before they reach a console or shared log.
 
 Short values (a 4-digit MPIN) are deliberately excluded from exact-match
 replacement — they would blank strike prices and quantities — and are caught by

@@ -1,5 +1,5 @@
 """
-Shared helper for index data download scripts.
+Shared helper for Fyers index-history download scripts.
 
 Why this file exists:
 - Your project already had one NIFTY-only script.
@@ -11,8 +11,8 @@ Why this file exists:
 High-level flow used by the wrapper scripts:
 1. Read command-line arguments.
 2. Resolve a concrete date range from either explicit dates or a lookback.
-3. Break the full range into smaller chunks because Dhan minute API does not
-   allow a very large range in a single request.
+3. Break the full range into bounded chunks so an interrupted Fyers history
+   download can resume safely.
 4. Download each chunk, normalize the broker response into a clean OHLC table,
    and append it to the CSV as it arrives.
 5. Record the progress in a manifest beside the CSV, so an interrupted run
@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
-from dhanhq import DhanContext, dhanhq
 from dotenv import load_dotenv
 
 # `python algo.py fetch-data ...` launches this file as a SCRIPT, so Python puts
@@ -62,6 +61,7 @@ else:
         MarketDataValidationError,
         validate_ohlc_frame,
     )
+from Dependencies.fyers_market_data import FyersMarketDataClient  # noqa: E402
 
 # Credentials live in Dependencies/.env like everywhere else in this repo.
 # Without this the extractors could only see variables already exported in the
@@ -91,9 +91,9 @@ class IndexFetchDefaults:
     interval: int = 1
     lookback: str = "5y"
     # SECURITY: never hardcode credentials here. The client id resolves CLI
-    # flag -> environment variable (DHAN_CLIENT_CODE) -> this blank. The access
-    # token is a SECRET and resolves environment variable (DHAN_TOKEN_ID, e.g.
-    # from Dependencies/.env) -> this blank ONLY -- there is deliberately no
+    # flag -> environment variable (FYERS_CLIENT_ID) -> this blank. The access
+    # token is a SECRET and resolves environment variable (FYERS_ACCESS_TOKEN)
+    # from Dependencies/.env -> this blank ONLY -- there is deliberately no
     # CLI flag for it (MAT-108): a token typed on the command line lands in
     # shell history and process listings. A real client id + access token used
     # to live in these defaults; they were removed (and remain in old git
@@ -113,7 +113,7 @@ def parse_args(defaults: IndexFetchDefaults):
     parser = argparse.ArgumentParser(
         description=(
             f"Fetch 1-minute {defaults.display_name} OHLC data for a selectable "
-            "recent period (1d/7d/15d/1m/3m/6m/1y/5y) using Dhan API and save "
+            "recent period (1d/7d/15d/1m/3m/6m/1y/5y) using Fyers API and save "
             "it to CSV."
         )
     )
@@ -122,12 +122,12 @@ def parse_args(defaults: IndexFetchDefaults):
     # - the CLIENT ID is an account identifier (not a secret), so it may come
     #   from the CLI flag, then the environment, then the wrapper default.
     # - the ACCESS TOKEN is a secret and is read from the environment ONLY
-    #   (DHAN_ACCESS_TOKEN, loaded from Dependencies/.env above). There is
+    #   (FYERS_ACCESS_TOKEN, loaded from Dependencies/.env above). There is
     #   deliberately no --access-token flag: a token typed on the command
     #   line would land in shell history and process listings.
     parser.add_argument(
         "--client-id",
-        default=os.getenv("DHAN_CLIENT_CODE", defaults.default_client_id),
+        default=os.getenv("FYERS_CLIENT_ID", defaults.default_client_id),
     )
 
     parser.add_argument(
@@ -141,7 +141,7 @@ def parse_args(defaults: IndexFetchDefaults):
         "--interval",
         type=int,
         default=int(defaults.interval),
-        choices=[1, 5, 15, 25, 60],
+        choices=[1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 240],
     )
     parser.add_argument(
         "--lookback",
@@ -176,14 +176,7 @@ def parse_args(defaults: IndexFetchDefaults):
     args = parser.parse_args()
     # Attach the token AFTER parsing so it can never be supplied (or leaked)
     # through the command line; downstream code keeps reading args.access_token.
-    # DHAN_ACCESS_TOKEN is the key the rest of the repo uses and the one
-    # `algo.py setup-token` writes. DHAN_TOKEN_ID is accepted only so an
-    # operator who had exported the old name keeps working.
-    args.access_token = (
-        os.getenv("DHAN_ACCESS_TOKEN")
-        or os.getenv("DHAN_TOKEN_ID")
-        or defaults.default_access_token
-    )
+    args.access_token = os.getenv("FYERS_ACCESS_TOKEN") or defaults.default_access_token
     return args
 
 
@@ -260,7 +253,7 @@ def validate_single_epoch_unit(values: pd.Series) -> None:
     }
     if len(units) != 1:
         raise MarketDataValidationError(
-            f"Dhan chunk mixes epoch units: {', '.join(sorted(units))}"
+            f"Fyers history chunk mixes epoch units: {', '.join(sorted(units))}"
         )
 
 
@@ -280,7 +273,9 @@ def normalize_response_data(data, *, instrument_type: str = "") -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        if isinstance(data, (list, dict)):
+        if isinstance(data, pd.DataFrame):
+            df = data.copy()
+        elif isinstance(data, (list, dict)):
             df = pd.DataFrame(data)
         else:
             return pd.DataFrame()
@@ -332,8 +327,7 @@ def normalize_response_data(data, *, instrument_type: str = "") -> pd.DataFrame:
         else:
             ts = pd.to_datetime(out["timestamp_raw"], errors="coerce", utc=True)
 
-    # Dhan timestamps are normalized into India market time because that is the
-    # timezone your backtest data uses across the project.
+    # Normalize provider timestamps to India market time, as the backtests do.
     out["timestamp"] = ts.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     out = out.drop(columns=["timestamp_raw"])
     # A timestamp that would not parse is refused HERE, before anything filters
@@ -343,7 +337,7 @@ def normalize_response_data(data, *, instrument_type: str = "") -> pd.DataFrame:
     # advance the resume point past a gap nobody was told about.
     if out["timestamp"].isna().any():
         raise MarketDataValidationError(
-            f"Dhan chunk has {int(out['timestamp'].isna().sum())} unparseable timestamp(s)"
+            f"Fyers history chunk has {int(out['timestamp'].isna().sum())} unparseable timestamp(s)"
         )
     # Drop the non-session rows BEFORE validating: they are the bulk of what an
     # older window returns, and validating them first would either pass junk
@@ -352,6 +346,9 @@ def normalize_response_data(data, *, instrument_type: str = "") -> pd.DataFrame:
     out = drop_impossible_candles(out)
     if out.empty:
         return out
+    # Fyers may return a history window newest-first. Normalize each chunk to
+    # chronological order before the shared validator and CSV append logic.
+    out = out.sort_values("timestamp", kind="stable").reset_index(drop=True)
     out = validate_ohlc_frame(out)
 
     # NaN belongs in `invalid`, not filled away before the test. An absent
@@ -362,23 +359,13 @@ def normalize_response_data(data, *, instrument_type: str = "") -> pd.DataFrame:
     invalid = ~volume.map(math.isfinite) | (volume < 0)
     if invalid.any():
         if str(instrument_type).strip().upper() == "INDEX":
-            # An index has no traded volume. Dhan returns zeros for the whole of
-            # 2021, small negative counters (-1, -2, -3) on some 2022 bars --
-            # 221 of them in one 90-day window -- and sometimes nothing at all,
-            # and every backtest loader in this repo forces Volume to 0
-            # regardless. All three are the same non-answer about a field the
-            # instrument does not have.
-            #
-            # The PRICES on those bars are sound: once weekends and out-of-hours
-            # rows are clipped, every session in that window holds exactly 375
-            # bars. Dropping 221 real price bars to protect a field nobody reads
-            # would lose information for nothing, so the field is zeroed and the
-            # count is reported.
+            # Index feeds do not provide meaningful traded volume, and the
+            # project's backtest loaders force this field to zero regardless.
             print(f"Zeroing {int(invalid.sum())} invalid index volume value(s)")
             volume = volume.mask(invalid, 0.0)
         else:
             # Anywhere volume is a real quantity, a negative one is corruption.
-            raise MarketDataValidationError("Dhan chunk contains invalid volume")
+            raise MarketDataValidationError("Fyers history chunk contains invalid volume")
     out["volume"] = volume
 
     return out[["timestamp", "open", "high", "low", "close", "volume"]]
@@ -391,11 +378,6 @@ MAX_DROPPED_CANDLE_FRACTION = 0.001
 
 def drop_impossible_candles(frame: pd.DataFrame) -> pd.DataFrame:
     """Drop candles that contradict themselves; refuse a chunk that is mostly bad.
-
-    Dhan's older index history carries the occasional print whose high sits
-    below its own open. Measured while backfilling: exactly ONE row in 23,380
-    across 2021-12-26..2022-03-25, at 2022-03-25 09:15, open 17289.00 against a
-    high of 17287.10.
 
     Such a row is provably wrong -- no reading of a candle makes its high lower
     than the open it contains -- and failing a five-year backfill on one of them
@@ -427,7 +409,7 @@ def drop_impossible_candles(frame: pd.DataFrame) -> pd.DataFrame:
     share = dropped / len(frame)
     if share > MAX_DROPPED_CANDLE_FRACTION:
         raise MarketDataValidationError(
-            f"Dhan chunk has {dropped} self-contradicting candles of {len(frame)} "
+            f"Fyers history chunk has {dropped} self-contradicting candles of {len(frame)} "
             f"({share:.2%}) -- too many to be stray prints, refusing the chunk"
         )
 
@@ -439,16 +421,8 @@ def drop_impossible_candles(frame: pd.DataFrame) -> pd.DataFrame:
 def clip_to_session(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep only the bars that belong to a trading session.
 
-    Dhan's index history carries rows that are not session data, and they differ
-    by era:
-
-    - windows before roughly mid-2022 come back with ~650 bars a day running out
-      to 17:59, against the 375 a real session has;
-    - the same era carries rows on WEEKENDS, whose prices are visibly not the
-      index: measured on Saturday 2022-04-09, the close jumps 18396 -> 18584 ->
-      18371 -> 18842 inside one hour;
-    - the CURRENT day carries a synthetic "now" bar stamped at the wall clock
-      with flat OHLC and no volume.
+    Historical APIs can include pre/post-market, weekend, or forming rows that
+    do not belong in the strategy session.
 
     Both are minute-ALIGNED, so `validate_ohlc_frame` accepts them -- which makes
     them more dangerous than the malformed kind, not less: they would land in the
@@ -468,7 +442,7 @@ def clip_to_session(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_chunk(
-    dhan: dhanhq,
+    client: FyersMarketDataClient,
     security_id: str,
     exchange_segment: str,
     instrument_type: str,
@@ -483,50 +457,28 @@ def fetch_chunk(
     - the main loop stays easy to read
     - error handling for one request is kept in one place
     """
-    resp = dhan.intraday_minute_data(
-        security_id=str(security_id),
-        exchange_segment=exchange_segment,
-        instrument_type=instrument_type,
-        from_date=chunk_start.strftime("%Y-%m-%d"),
-        to_date=chunk_end.strftime("%Y-%m-%d"),
+    frame = client.fetch_index_history(
+        int(security_id),
+        chunk_start,
+        chunk_end,
         interval=interval,
     )
 
-    if not isinstance(resp, dict):
-        raise RuntimeError(f"Unexpected API response type: {type(resp).__name__}")
-
-    status = str(resp.get("status", "")).strip().lower()
-    if status and status != "success":
-        remarks = resp.get("remarks") or resp.get("message") or resp.get("data")
-        remarks_text = str(remarks).strip().lower()
-
-        # Empty windows can happen on holidays or on date ranges where the API
-        # simply has no candles. Those cases should not crash the whole script.
-        if any(
-            token in remarks_text
-            for token in ["no data", "no records", "not found", "does not exist"]
-        ):
-            return pd.DataFrame()
-
-        raise RuntimeError(
-            f"API failed for {chunk_start} -> {chunk_end}: status={status}, details={remarks}"
-        )
-
-    normalized = normalize_response_data(resp.get("data"), instrument_type=instrument_type)
+    normalized = normalize_response_data(frame, instrument_type=instrument_type)
     if normalized.empty:
         return normalized
 
     dates = pd.DatetimeIndex(normalized["timestamp"]).date
     if any(timestamp_date < chunk_start or timestamp_date > chunk_end for timestamp_date in dates):
         raise MarketDataValidationError(
-            f"Dhan returned a candle outside requested chunk {chunk_start} -> {chunk_end}"
+            f"Fyers returned a candle outside requested chunk {chunk_start} -> {chunk_end}"
         )
     return normalized
 
 
 def normalize_exchange_segment(segment: str) -> str:
     """
-    Convert friendly segment labels into the exact wire value Dhan expects.
+    Canonicalize old segment arguments kept for CLI compatibility and manifests.
 
     This makes the script more forgiving if you later pass a friendlier alias
     such as `NSE_IDX` instead of `IDX_I`.
@@ -555,10 +507,8 @@ def fetch_1m_history(
     Download the full requested date range in many smaller pieces.
 
     Why chunking matters:
-    - Dhan minute API has a practical limit on how much history can be fetched
-      in one request.
-    - So we walk from start date to end date chunk by chunk, save each chunk,
-      and then merge them into one final DataFrame.
+    - Fyers history requests are bounded to a small date window.
+    - Walking the range chunk by chunk also permits safe resume after failure.
 
     `on_chunk` is how the resumable path takes delivery. It is called with every
     chunk AND that chunk's end date -- EMPTY ones included, so a run of holidays
@@ -572,12 +522,13 @@ def fetch_1m_history(
     are already on disk.
     """
     start_dt, end_dt = resolve_date_range(args)
-    # dhanhq >= 2.1 (we pin 2.2.0) takes a DhanContext(client_id, access_token),
-    # not two positional args -- the old `dhanhq(client_id, access_token)` form
-    # raises TypeError under the pinned SDK. Build the context explicitly, the
-    # same way the master runner's DhanBrokerClient does.
-    dhan_context = DhanContext(args.client_id, args.access_token)
-    dhan = dhanhq(dhan_context)
+    client = FyersMarketDataClient(
+        args.client_id,
+        args.access_token,
+        "",
+        _REPO_ROOT / "Dependencies" / "fyers_nse_fo.csv",
+        load_symbol_mappings=False,
+    )
     exchange_segment = normalize_exchange_segment(args.exchange_segment)
 
     all_chunks = []
@@ -600,7 +551,7 @@ def fetch_1m_history(
         print(f"Requesting chunk: {cursor} -> {chunk_end}")
 
         chunk_df = fetch_chunk(
-            dhan=dhan,
+            client=client,
             security_id=args.security_id,
             exchange_segment=exchange_segment,
             instrument_type=args.instrument_type,
@@ -665,9 +616,7 @@ def atomic_write_csv(frame: pd.DataFrame, output: str | os.PathLike[str]) -> Non
 # time you refresh the data. Chunks are therefore appended as they arrive and a
 # manifest records how far the run got.
 #
-# This mirrors the expired-options engine's manifest
-# (`expired_options_fetch_dhan_common.py`), deliberately: the same failure modes
-# apply, and one shape to learn is better than two.
+# The same integrity rules apply to every resumable index-history run.
 
 
 #: Suffix of the progress file, alongside the CSV it describes.
@@ -734,6 +683,7 @@ def run_signature(args, start: date) -> dict[str, object]:
 
     return {
         "start": start.isoformat(),
+        "provider": "FYERS",
         "interval": int(args.interval),
         "chunk_days": int(args.chunk_days),
         "security_id": str(args.security_id),
@@ -928,9 +878,9 @@ def run_index_fetcher(defaults: IndexFetchDefaults) -> None:
 
     if not args.client_id or not args.access_token:
         raise ValueError(
-            "Missing credentials. Set DHAN_CLIENT_CODE and DHAN_ACCESS_TOKEN in "
-            "Dependencies/.env (run `python algo.py setup-token` to refresh the "
-            "token). Only --client-id may be overridden on the command line; "
+            "Missing credentials. Set FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN in "
+            "Dependencies/.env. Generate an access token in the Fyers API "
+            "dashboard and store it there. Only --client-id may be overridden; "
             "the token is environment-only."
         )
 

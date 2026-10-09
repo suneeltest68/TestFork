@@ -84,19 +84,13 @@ python_version = "3.12"
 # covered by `compileall` plus the unittest suites.
 files = [
     "algo.py",
-    "Data Extractors/index_1m_5y_data_fetch_dhan_common.py",
-    # Tier 3 of ADR-0014: renamed 2026-09-02 and admitted here in the same
-    # commit. The engine was already checked; these three wrappers were outside
-    # only because of their spaced names, and they pass unmodified.
-    "Data Extractors/nifty_1m_5y_data_fetch_dhan.py",
-    "Data Extractors/banknifty_1m_5y_data_fetch_dhan.py",
-    "Data Extractors/finnifty_1m_5y_data_fetch_dhan.py",
-    # The expired-options extractor, typed from the start.
-    "Data Extractors/expiry_calendar.py",
-    "Data Extractors/expired_options_fetch_dhan_common.py",
-    "Data Extractors/nifty_expired_options_fetch_dhan.py",
+    "Data Extractors/index_1m_5y_data_fetch_fyers_common.py",
+    "Data Extractors/nifty_1m_5y_data_fetch_fyers.py",
+    "Data Extractors/banknifty_1m_5y_data_fetch_fyers.py",
+    "Data Extractors/finnifty_1m_5y_data_fetch_fyers.py",
     "Dependencies/broker_contract.py",
     "Dependencies/check_env_config.py",
+    "Dependencies/fyers_market_data.py",
     # The read-only monitoring dashboard. Typed from the start; the pure half
     # carries a 90% coverage budget in scripts/check_coverage_thresholds.py.
     "Dependencies/dashboard_snapshot.py",
@@ -200,7 +194,7 @@ files = [
     "Signal Generators/SL Hunting AI Agent/sl_hunting_tools.py",
 ]
 # Sibling imports (sl_hunting_agent -> sl_hunting_knowledge, shoonya_execution
-# -> NorenApi, expired_options_fetch_dhan_common -> expiry_calendar, logic
+# -> NorenApi, logic
 # modules -> *_strategy_common) resolve through these roots.
 mypy_path = [
     "Dependencies",

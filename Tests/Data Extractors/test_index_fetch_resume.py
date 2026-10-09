@@ -26,10 +26,10 @@ import pytest
 
 # Tests/Data Extractors/<this file> -> the repository root is two levels up.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = _REPO_ROOT / "Data Extractors" / "index_1m_5y_data_fetch_dhan_common.py"
-spec = importlib.util.spec_from_file_location("index_1m_5y_data_fetch_dhan_common", MODULE_PATH)
+MODULE_PATH = _REPO_ROOT / "Data Extractors" / "index_1m_5y_data_fetch_fyers_common.py"
+spec = importlib.util.spec_from_file_location("index_1m_5y_data_fetch_fyers_common", MODULE_PATH)
 fetcher = importlib.util.module_from_spec(spec)
-sys.modules["index_1m_5y_data_fetch_dhan_common"] = fetcher
+sys.modules["index_1m_5y_data_fetch_fyers_common"] = fetcher
 spec.loader.exec_module(fetcher)
 
 DEFAULTS = SimpleNamespace(display_name="NIFTY")
@@ -86,8 +86,7 @@ def _responder(*, fail_on: date | None = None, empty: bool = False):
 def _run(args, respond) -> None:
     with (
         patch.object(fetcher, "parse_args", return_value=args),
-        patch.object(fetcher, "DhanContext"),
-        patch.object(fetcher, "dhanhq"),
+        patch.object(fetcher, "FyersMarketDataClient"),
         patch.object(fetcher, "fetch_chunk", side_effect=respond),
     ):
         fetcher.run_index_fetcher(DEFAULTS)
@@ -326,8 +325,8 @@ def test_the_manifest_records_which_file_it_describes(tmp_path):
 #
 # A `--lookback 5y` run signs its manifest with "today minus five years", so the
 # signature changed every day, the manifest was discarded, and the "start over"
-# branch DELETED the CSV before fetching a single chunk. The day the Dhan token
-# had expired (DH-901) the first chunk failed and a 461,777-row file was gone.
+# branch DELETED the CSV before fetching a single chunk. A failed first request
+# could then leave a 461,777-row file gone with nothing to show for it.
 
 
 class _Clock(datetime):

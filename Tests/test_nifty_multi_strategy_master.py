@@ -1267,7 +1267,9 @@ class TestDhanBrokerClient(unittest.TestCase):
     """
 
     def _make_broker(self):
-        broker = master_file.DhanBrokerClient.__new__(master_file.DhanBrokerClient)
+        broker = master_file._LegacyDhanMarketDataClient.__new__(
+            master_file._LegacyDhanMarketDataClient
+        )
         broker.dhan = MagicMock()
         broker._dhan_context = MagicMock()
         return broker
@@ -1512,7 +1514,7 @@ class TestMarketDataHttpTimeout(unittest.TestCase):
             patch.object(master_file, "dhanhq"),
         ):
             ctx_cls.return_value.get_dhan_http.return_value = http
-            master_file.DhanBrokerClient("client", "token")
+            master_file._LegacyDhanMarketDataClient("client", "token")
         self.assertEqual(http.timeout, master_file.MARKET_DATA_HTTP_TIMEOUT_SECONDS)
         self.assertLessEqual(master_file.MARKET_DATA_HTTP_TIMEOUT_SECONDS, 15)
 
@@ -1523,7 +1525,7 @@ class TestMarketDataHttpTimeout(unittest.TestCase):
             patch.object(master_file, "dhanhq"),
         ):
             ctx_cls.return_value.get_dhan_http.return_value = None
-            master_file.DhanBrokerClient("client", "token")  # must not raise
+            master_file._LegacyDhanMarketDataClient("client", "token")  # must not raise
 
 
 class TestMarketDataSourceSelector(unittest.TestCase):
@@ -1713,8 +1715,9 @@ class TestWebSocketMarketDataFetcher(unittest.TestCase):
         desired = self.fetcher._desired_instruments()
         self.assertIn(self.index_key, desired)
         self.assertIn(("NSE_FNO", 49081), desired)
-        # Feed tuples use marketfeed codes and STRING security ids.
-        self.assertEqual(desired[("NSE_FNO", 49081)][0], 2)
+        # Feed tuples retain runner segments and use STRING security ids;
+        # Fyers resolves them to provider symbols before subscribing.
+        self.assertEqual(desired[("NSE_FNO", 49081)][0], "NSE_FNO")
         self.assertEqual(desired[("NSE_FNO", 49081)][1], "49081")
 
     def test_sync_subscriptions_adds_removes_and_protects_index(self):
@@ -1726,7 +1729,7 @@ class TestWebSocketMarketDataFetcher(unittest.TestCase):
         self.fetcher._sync_subscriptions()
         feed.subscribe_symbols.assert_called_once()
         added = feed.subscribe_symbols.call_args[0][0]
-        self.assertEqual([(t[0], t[1]) for t in added], [(2, "49081")])
+        self.assertEqual([(t[0], t[1]) for t in added], [("NSE_FNO", "49081")])
 
         self.store.unregister_option_subscription(
             "NSE_FNO",
@@ -1736,7 +1739,7 @@ class TestWebSocketMarketDataFetcher(unittest.TestCase):
         self.fetcher._sync_subscriptions()
         feed.unsubscribe_symbols.assert_called_once()
         removed = feed.unsubscribe_symbols.call_args[0][0]
-        self.assertEqual([(t[0], t[1]) for t in removed], [(2, "49081")])
+        self.assertEqual([(t[0], t[1]) for t in removed], [("NSE_FNO", "49081")])
         # The index leg must never be unsubscribed.
         for call in feed.unsubscribe_symbols.call_args_list:
             for entry in call[0][0]:

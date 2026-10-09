@@ -5,7 +5,7 @@ algo.py - one friendly command-line entry point for the whole project.
 This repo has several separate scripts you normally run one at a time, each with
 its own long path and its own options:
 
-    python "Data Extractors/nifty_1m_5y_data_fetch_dhan.py" --lookback 5y
+    python "Data Extractors/nifty_1m_5y_data_fetch_fyers.py" --lookback 5y
     python "My Backtest Files (For Reference)/renko_strategy_backtest.py" --data ...
     python "nifty_multi_strategy_master.py"
 
@@ -37,9 +37,13 @@ The commands:
                that .env, so this command takes no options of its own.
       python algo.py run
 
-  setup-token  One-time DhanHQ login that writes a fresh access token into .env.
+  setup-token  One-time DhanHQ execution login that writes an access token into .env.
                Interactive (opens a browser / asks you to paste a code).
       python algo.py setup-token
+
+  setup-fyers-token  Generate a Fyers market-data access token and save it to .env.
+               Requires FYERS_CLIENT_ID, FYERS_SECRET_KEY and FYERS_REDIRECT_URI.
+      python algo.py setup-fyers-token
 
   diagnose     Read-only broker connectivity + option-symbol check (can optionally
                place a confirmation-gated round-trip TEST order with --place-order).
@@ -82,17 +86,9 @@ REPO_ROOT = Path(__file__).resolve().parent
 
 # `fetch-data --index <key>`
 INDEX_SCRIPTS = {
-    "nifty": "Data Extractors/nifty_1m_5y_data_fetch_dhan.py",
-    "banknifty": "Data Extractors/banknifty_1m_5y_data_fetch_dhan.py",
-    "finnifty": "Data Extractors/finnifty_1m_5y_data_fetch_dhan.py",
-}
-
-# `fetch-expired-options --index <key>`
-# Separate from INDEX_SCRIPTS on purpose: these download expired OPTION
-# contracts (premium, OI, IV) rather than the index itself, and they take a
-# different flag set.
-EXPIRED_OPTIONS_SCRIPTS = {
-    "nifty": "Data Extractors/nifty_expired_options_fetch_dhan.py",
+    "nifty": "Data Extractors/nifty_1m_5y_data_fetch_fyers.py",
+    "banknifty": "Data Extractors/banknifty_1m_5y_data_fetch_fyers.py",
+    "finnifty": "Data Extractors/finnifty_1m_5y_data_fetch_fyers.py",
 }
 
 # `backtest --strategy <key>`
@@ -121,6 +117,7 @@ BROKER_DIAGNOSTICS = {
 # Commands that always map to exactly one script (no selector needed).
 MASTER_SCRIPT = "nifty_multi_strategy_master.py"
 TOKEN_SETUP_SCRIPT = "Dependencies/dhan_token_setup.py"
+FYERS_TOKEN_SETUP_SCRIPT = "Dependencies/fyers_token_setup.py"
 CHECK_ENV_SCRIPT = "Dependencies/check_env_config.py"
 
 
@@ -167,17 +164,6 @@ def build_parser() -> argparse.ArgumentParser:
              "--start-date, --end-date, --output, ...) pass through to the fetcher.",
     )
 
-    fetch_options = sub.add_parser(
-        "fetch-expired-options",
-        help="Download expired index-option history (premium, OI, IV) from DhanHQ.",
-    )
-    fetch_options.add_argument(
-        "--index", required=True, choices=sorted(EXPIRED_OPTIONS_SCRIPTS),
-        help="Which underlying to download. All other flags (--strike-range, "
-             "--expiry-flag, --lookback, --dry-run, --verify-expiries, ...) pass "
-             "through to the fetcher.",
-    )
-
     backtest = sub.add_parser(
         "backtest",
         help="Run one strategy's backtest against a historical-data CSV.",
@@ -196,6 +182,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "setup-token",
         help="One-time interactive DhanHQ login that writes a fresh token into .env.",
+    )
+
+    sub.add_parser(
+        "setup-fyers-token",
+        help="Generate a Fyers market-data access token and save it to .env.",
     )
 
     diagnose = sub.add_parser(
@@ -237,14 +228,14 @@ def main(argv=None) -> int:
 
     if args.command == "fetch-data":
         return _run(INDEX_SCRIPTS[args.index], forwarded)
-    if args.command == "fetch-expired-options":
-        return _run(EXPIRED_OPTIONS_SCRIPTS[args.index], forwarded)
     if args.command == "backtest":
         return _run(BACKTEST_SCRIPTS[args.strategy], forwarded)
     if args.command == "run":
         return _run(MASTER_SCRIPT, forwarded)
     if args.command == "setup-token":
         return _run(TOKEN_SETUP_SCRIPT, forwarded)
+    if args.command == "setup-fyers-token":
+        return _run(FYERS_TOKEN_SETUP_SCRIPT, forwarded)
     if args.command == "diagnose":
         return _run(BROKER_DIAGNOSTICS[args.broker], forwarded)
     if args.command == "check-env":
