@@ -24,6 +24,7 @@ MASTER_URLS = {
 }
 MASTER_CACHE = Path(os.getenv("FYERS_SYMBOL_CACHE", "Dependencies/fyers_symbol_cache"))
 
+
 def legacy_instrument_csv() -> Path | None:
     configured = os.getenv("FYERS_LEGACY_INSTRUMENT_CSV", "").strip()
     if configured:
@@ -33,6 +34,8 @@ def legacy_instrument_csv() -> Path | None:
     root = Path(__file__).resolve().parents[1]
     candidates = sorted(root.glob("all_instrument*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0] if candidates else None
+
+
 INDEX_ALIASES = {
     "13": ("NIFTY", "NSE:NIFTY50-INDEX"),
     "25": ("BANKNIFTY", "NSE:NIFTYBANK-INDEX"),
@@ -41,11 +44,13 @@ INDEX_ALIASES = {
     "FINNIFTY": ("FINNIFTY", "NSE:FINNIFTY-INDEX"),
 }
 
+
 def _first(record: dict[str, Any], *names: str, default: Any = None) -> Any:
     for name in names:
         if record.get(name) not in (None, ""):
             return record[name]
     return default
+
 
 def _expiry(record: dict[str, Any]) -> date | None:
     raw = _first(record, "expiryDate", "expiry_date", "expiry")
@@ -63,6 +68,7 @@ def _expiry(record: dict[str, Any]) -> date | None:
         except ValueError:
             continue
     return None
+
 
 class FyersSymbolMaster:
     """Cached, exact-symbol lookups against FYERS public daily symbol masters."""
