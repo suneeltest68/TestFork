@@ -20,7 +20,7 @@ for entry in (str(ROOT), str(DEPS)):
     if entry not in sys.path:
         sys.path.insert(0, entry)
 from broker_contract import (  # noqa: E402
-    BrokerQueryResult, ExecutionClient, OpenOrder, OpenPosition, OrderResult,
+    BrokerQueryResult, OpenOrder, OpenPosition, OrderResult,
     OrderStatus, exact_int, normalize_order_result,
 )
 from fyers_common import FyersSymbolMaster, legacy_instrument_csv  # noqa: E402
@@ -185,7 +185,7 @@ class FyersExecutionClient:
     def cancel_order(self, order_id: str, requested_quantity: int = 0) -> OrderResult:
         api = self._ensure_api()
         try:
-            ack = api.cancel_order(data={"id": str(order_id)})
+            api.cancel_order(data={"id": str(order_id)})
         except Exception as exc:
             self._poisoned = True
             return normalize_order_result(order_id=order_id, requested_quantity=max(0, requested_quantity),
