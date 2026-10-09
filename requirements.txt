@@ -20,6 +20,8 @@
 
 # ---- LIVE RUNTIME (DEPS-001: the verified live-runner set) -------------------
 dhanhq==2.2.0
+# FYERS v3 REST + data WebSocket client used by the migrated master runner.
+fyers-apiv3==3.1.15
 pandas==3.0.6
 numpy==2.5.3
 backtesting==0.6.6
