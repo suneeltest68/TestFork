@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from datetime import date
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 FYERS_DIR = ROOT / "Dependencies" / "FYERS API"
 sys.path.insert(0, str(FYERS_DIR))
 sys.path.insert(0, str(ROOT))
 
-from datetime import date
-
-from fyers_common import FyersSymbolMaster
+from fyers_common import FyersSymbolMaster  # noqa: E402
 
 
 class StaticMaster(FyersSymbolMaster):
