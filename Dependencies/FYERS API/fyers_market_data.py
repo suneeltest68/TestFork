@@ -20,7 +20,7 @@ import pytz
 from fyers_apiv3 import fyersModel
 from fyers_apiv3.FyersWebsocket import data_ws
 
-from fyers_common import FyersSymbolMaster
+from fyers_common import FyersSymbolMaster, legacy_instrument_csv
 
 IST = pytz.timezone("Asia/Kolkata")
 LOG = logging.getLogger(__name__)
@@ -64,8 +64,8 @@ class FyersMarketDataClient:
         # Options are resolved from the legacy instrument master and mapped to
         # FYERS by exact expiry/strike/right in the execution adapter. Unknown
         # numeric ids must fail closed rather than be interpreted as FYERS tokens.
-        path = Path(os.getenv("FYERS_LEGACY_INSTRUMENT_CSV", ""))
-        if not path.is_file():
+        path = legacy_instrument_csv()
+        if path is None or not path.is_file():
             raise LookupError(
                 "FYERS option lookup requires FYERS_LEGACY_INSTRUMENT_CSV pointing "
                 "to the existing Dhan-format instrument CSV"
