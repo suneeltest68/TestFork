@@ -8,8 +8,6 @@ FYERS_DIR = ROOT / "Dependencies" / "FYERS API"
 sys.path.insert(0, str(FYERS_DIR))
 sys.path.insert(0, str(ROOT))
 
-import os
-
 import pytest
 
 from fyers_execution import FyersExecutionClient
