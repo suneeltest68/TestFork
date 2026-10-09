@@ -13,6 +13,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -53,7 +54,7 @@ def _expiry(record: dict[str, Any]) -> date | None:
     try:
         number = float(raw)
         if number > 1_000_000_000:
-            return datetime.fromtimestamp(number, timezone.utc).date()
+            return datetime.fromtimestamp(number, timezone.utc).astimezone(ZoneInfo('Asia/Kolkata')).date()
     except (TypeError, ValueError, OverflowError):
         pass
     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y", "%Y%m%d"):
