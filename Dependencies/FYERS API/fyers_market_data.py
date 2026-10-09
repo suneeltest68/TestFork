@@ -25,16 +25,19 @@ from fyers_common import FyersSymbolMaster, legacy_instrument_csv
 IST = pytz.timezone("Asia/Kolkata")
 LOG = logging.getLogger(__name__)
 
+
 def _required_env(key: str) -> str:
     value = os.getenv(key, "").strip()
     if not value:
         raise ValueError(f"{key} must be configured in Dependencies/.env")
     return value
 
+
 def _ok(response: Any, operation: str) -> dict:
     if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
         raise RuntimeError(f"FYERS {operation} failed: {response!r}")
     return response
+
 
 class FyersMarketDataClient:
     def __init__(self, app_id: str | None = None, access_token: str | None = None):
@@ -155,6 +158,7 @@ class FyersMarketDataClient:
 
     def make_market_feed(self, instruments: list[tuple[int, str, int]]):
         return FyersFeedBridge(self, instruments)
+
 
 class FyersFeedBridge:
     """Expose the current feed's queue/subscription interface over FYERS data_ws."""
