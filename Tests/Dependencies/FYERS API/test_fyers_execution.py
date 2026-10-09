@@ -13,11 +13,13 @@ sys.path.insert(0, str(ROOT))
 from fyers_execution import FyersExecutionClient  # noqa: E402
 
 
+
 def test_live_orders_fail_closed_without_compliance_ack(monkeypatch):
     monkeypatch.delenv("FYERS_LIVE_COMPLIANCE_CONFIRMED", raising=False)
     client = FyersExecutionClient()
     with pytest.raises(RuntimeError, match="live orders blocked"):
         client.place_market_order("NSE:NIFTY26OCT26000CE", "BUY", 25)
+
 
 
 def test_order_result_requires_confirmed_full_fill(monkeypatch):
@@ -30,6 +32,7 @@ def test_order_result_requires_confirmed_full_fill(monkeypatch):
     assert result.status.value == "FILLED"
     assert result.filled_quantity == 25
     assert result.average_fill_price == 102.5
+
 
 
 class FakeFyersApi:
