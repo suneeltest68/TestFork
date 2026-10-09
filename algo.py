@@ -37,7 +37,7 @@ The commands:
                that .env, so this command takes no options of its own.
       python algo.py run
 
-  setup-token  One-time DhanHQ login that writes a fresh access token into .env.
+  setup-token  One-time FYERS login that writes a fresh access token into .env.
                Interactive (opens a browser / asks you to paste a code).
       python algo.py setup-token
 
@@ -112,6 +112,7 @@ BACKTEST_SCRIPTS = {
 # these keys automatically; each value is the script that receives the remaining
 # CE/PE, strike, expiry, and --place-order arguments unchanged.
 BROKER_DIAGNOSTICS = {
+    "fyers": "Dependencies/FYERS API/diagnose_fyers_symbol.py",
     "dhan": "Dependencies/Dhan API/diagnose_dhan_symbol.py",
     "flattrade": "Dependencies/Flattrade API/diagnose_flattrade_symbol.py",
     "kotak": "Dependencies/Kotak API/diagnose_kotak_symbol.py",
@@ -120,7 +121,7 @@ BROKER_DIAGNOSTICS = {
 
 # Commands that always map to exactly one script (no selector needed).
 MASTER_SCRIPT = "nifty_multi_strategy_master.py"
-TOKEN_SETUP_SCRIPT = "Dependencies/dhan_token_setup.py"
+TOKEN_SETUP_SCRIPT = "Dependencies/fyers_token_setup.py"
 CHECK_ENV_SCRIPT = "Dependencies/check_env_config.py"
 
 
@@ -195,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser(
         "setup-token",
-        help="One-time interactive DhanHQ login that writes a fresh token into .env.",
+        help="One-time interactive FYERS login that writes a fresh token into .env.",
     )
 
     diagnose = sub.add_parser(
