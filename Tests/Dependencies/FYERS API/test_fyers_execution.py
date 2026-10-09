@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 FYERS_DIR = ROOT / "Dependencies" / "FYERS API"
 sys.path.insert(0, str(FYERS_DIR))
 sys.path.insert(0, str(ROOT))
 
-import pytest
-
-from fyers_execution import FyersExecutionClient
+from fyers_execution import FyersExecutionClient  # noqa: E402
 
 
 def test_live_orders_fail_closed_without_compliance_ack(monkeypatch):
