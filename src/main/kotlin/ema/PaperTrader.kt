@@ -9,6 +9,12 @@ class PaperTrader(private val strategy: EmaTrendStrategy = EmaTrendStrategy()) {
     private val history = mutableListOf<Candle>()
     private var lastEvaluated: LocalDateTime? = null
 
+    @Synchronized fun seedHistory(candles: List<Candle>) {
+        history.clear()
+        history.addAll(candles.sortedBy { it.timestamp }.distinctBy { it.timestamp })
+        lastEvaluated = history.lastOrNull()?.timestamp
+    }
+
     @Synchronized fun onCompletedFiveMinuteCandle(candle: Candle) {
         if (lastEvaluated == candle.timestamp) return
         lastEvaluated = candle.timestamp
