@@ -607,7 +607,7 @@ FETCH_POLL_SECONDS = _env_int("FETCH_POLL_SECONDS", 2)
 #                true-up against Dhan's official candles).
 # Requires the paid Dhan Data API subscription in WEBSOCKET mode. Any value
 # other than exactly "WEBSOCKET" FAILS CLOSED to the battle-tested REST poller.
-MARKET_DATA_SOURCE = _env_str("MARKET_DATA_SOURCE", "REST").upper().strip() or "REST"
+MARKET_DATA_SOURCE = _env_str("MARKET_DATA_SOURCE", "WEBSOCKET").upper().strip() or "WEBSOCKET"
 
 # Seconds past each minute rollover before the websocket producer trues-up the
 # just-closed candle from REST (Dhan's official candle can lag a few seconds).
@@ -4313,7 +4313,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
             desired[(segment, security_id)] = (
                 feed_code,
                 str(security_id),
-                MarketFeed.Ticker,
+                getattr(MarketFeed, "Ticker", 15),
             )
         return desired
 
@@ -19862,7 +19862,7 @@ def main() -> None:
         ) from exc
 
     logger.info(
-        "Starting NIFTY Multi Strategy MASTER paper runner (dhanhq) | "
+        "Starting NIFTY Multi Strategy MASTER paper runner (broker=%s) | "
         "ATM single-leg family (24): 10 core - Renko 1m, EMA 5m, HeikinAshi 1m, "
         "ProfitShooter 5m, Goldmine 5m, MoneyMachine 5m, OpeningStrike 5m "
         "PCR/VWAP/ATR, CPR 5m, CPR Algo 3 5m (multi-instrument), CPR Algo 4 5m (SRSI/VWAP); "
