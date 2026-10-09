@@ -89,7 +89,7 @@ def evaluate_latest(frame: pd.DataFrame, engine: EMATrendSignalEngine,
     if enriched.empty:
         return None, position, None
     candle = enriched.iloc[-1]
-    decision = engine.evaluate_candle(enriched, position_context=position)
+    decision = engine.evaluate_candle(enriched, position=position)
     action = getattr(decision, "action", "HOLD")
     if action == "ENTER_LONG":
         position = EMATrendPositionContext(direction="LONG", entry_underlying=float(candle["close"]))
