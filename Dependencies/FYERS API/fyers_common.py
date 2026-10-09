@@ -92,11 +92,18 @@ class FyersSymbolMaster:
                 raise ValueError(f"Unexpected FYERS {segment} symbol master payload")
             path.write_text(json.dumps(payload), encoding="utf-8")
         if isinstance(payload, dict):
-            records = payload.get("data", payload.get("symbols", []))
+            records = payload.get("data", payload.get("symbols"))
+            if records is None:
+                # The published JSON masters may be keyed by the exact ticker
+                # rather than wrapped in a top-level list.
+                records = [
+                    ({"symTicker": key, **value} if isinstance(value, dict) else None)
+                    for key, value in payload.items()
+                ]
         else:
             records = payload
         if not isinstance(records, list):
-            raise ValueError(f"FYERS {segment} symbol master is not a list")
+            raise ValueError(f"FYERS {segment} symbol master has an unsupported shape")
         self._records[segment] = [r for r in records if isinstance(r, dict)]
         return self._records[segment]
 
