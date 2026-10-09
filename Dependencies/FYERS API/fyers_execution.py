@@ -35,17 +35,30 @@ def _env(key: str) -> str:
 
 class FyersExecutionClient:
     def __init__(self):
-        self.app_id = _env("FYERS_APP_ID")
-        self.token = _env("FYERS_ACCESS_TOKEN")
-        self.api = fyersModel.FyersModel(client_id=self.app_id, token=self.token, is_async=False, log_path="")
+        # Defer credentials/network access until the existing live-startup gate
+        # explicitly asks this adapter to log in.
+        self.app_id = ""
+        self.token = ""
+        self.api = None
+        self.is_logged_in = False
         self.symbols = FyersSymbolMaster()
         self._legacy: dict[str, dict[str, Any]] = {}
         self._poisoned = False
 
+    def _ensure_api(self):
+        if self.api is None:
+            self.app_id = _env("FYERS_APP_ID")
+            self.token = _env("FYERS_ACCESS_TOKEN")
+            self.api = fyersModel.FyersModel(
+                client_id=self.app_id, token=self.token, is_async=False, log_path=""
+            )
+        return self.api
+
     def ensure_logged_in(self):
-        resp = self.api.get_profile()
+        resp = self._ensure_api().get_profile()
         if not isinstance(resp, dict) or str(resp.get("s", "")).lower() != "ok":
             raise RuntimeError(f"FYERS profile validation failed: {resp!r}")
+        self.is_logged_in = True
         return True
 
     def preload_scrip_master(self):
@@ -82,8 +95,9 @@ class FyersExecutionClient:
                 expiry, float(row["STRIKE_PRICE"]), str(row["OPTION_TYPE"]))
         raise LookupError(f"No exact FYERS mapping for legacy symbol {value!r}")
 
-    def place_market_order(self, trading_symbol: str, transaction_type: str, quantity: int,
-                           product_type: str = "INTRADAY", order_tag: str = "") -> OrderResult:
+    def place_market_order(self, symbol: str, side: str, quantity: int,
+                           exchange_segment: str = "NSE_FNO", product_type: str = "INTRADAY",
+                           *, order_tag: str = "") -> OrderResult:
         if os.getenv("FYERS_LIVE_COMPLIANCE_CONFIRMED", "false").lower() not in ("1", "true", "yes"):
             raise RuntimeError("FYERS live orders blocked: set FYERS_LIVE_COMPLIANCE_CONFIRMED=true only after confirming compliant API app and whitelisted static IP")
         if self._poisoned:
@@ -92,8 +106,9 @@ class FyersExecutionClient:
                 reason="new orders blocked until explicit reconciliation")
         if isinstance(quantity, bool) or int(quantity) <= 0:
             raise ValueError("quantity must be a positive integer")
-        symbol = self._map_symbol(trading_symbol)
-        side = 1 if str(transaction_type).upper() in ("BUY", "B") else -1
+        symbol = self._map_symbol(symbol)
+        side = 1 if str(side).upper() in ("BUY", "B", "1") else -1
+        api = self._ensure_api()
         tag = "".join(c for c in str(order_tag) if c.isalnum())[:20]
         payload = {"symbol": symbol, "qty": int(quantity), "type": 2, "side": side,
                    "productType": "INTRADAY" if str(product_type).upper() in ("INTRADAY", "MIS") else "MARGIN",
@@ -101,7 +116,7 @@ class FyersExecutionClient:
                    "disclosedQty": 0, "offlineOrder": False, "stopLoss": 0,
                    "takeProfit": 0, "orderTag": tag, "isSliceOrder": False}
         try:
-            ack = self.api.place_order(data=payload)
+            ack = api.place_order(data=payload)
         except Exception as exc:
             self._poisoned = True
             return normalize_order_result(order_id="", requested_quantity=int(quantity),
@@ -117,7 +132,7 @@ class FyersExecutionClient:
         last = None
         while time.monotonic() < deadline:
             try:
-                book = self.api.orderbook()
+                book = api.orderbook()
                 if isinstance(book, dict) and str(book.get("s", "")).lower() == "ok":
                     rows = book.get("orderBook", book.get("data", []))
                     last = next((r for r in rows if str(r.get("id", r.get("orderNumber", ""))) == order_id), None)
@@ -138,31 +153,81 @@ class FyersExecutionClient:
             filled_quantity=None, broker_state=str((last or {}).get("status", "TIMEOUT")),
             reason="FYERS order not conclusively confirmed; reconcile before any new order")
 
-    def get_order_status(self, order_id: str):
-        book = self.api.orderbook()
+    @staticmethod
+    def _state_label(value: Any) -> str:
+        # FYERS order status enum: 1 cancelled, 2 traded, 4 transit,
+        # 5 rejected, 6 pending, 7 expired; unknown values stay unknown.
+        return {1: "CANCELLED", 2: "TRADED", 4: "TRANSIT", 5: "REJECTED",
+                6: "PENDING", 7: "EXPIRED"}.get(value, str(value).upper())
+
+    def get_order_status(self, order_id: str, requested_quantity: int = 0) -> OrderResult:
+        api = self._ensure_api()
+        book = api.orderbook()
         if not isinstance(book, dict) or str(book.get("s", "")).lower() != "ok":
-            return BrokerQueryResult(ok=False, error=f"FYERS orderbook response: {book!r}")
+            return normalize_order_result(order_id=order_id, requested_quantity=max(0, requested_quantity),
+                filled_quantity=None, broker_state="UNKNOWN", reason=f"FYERS orderbook response: {book!r}")
         rows = book.get("orderBook", book.get("data", []))
-        row = next((r for r in rows if str(r.get("id", "")) == str(order_id)), None)
-        return BrokerQueryResult(ok=True, data=row)
+        row = next((r for r in rows if str(r.get("id", r.get("orderNumber", ""))) == str(order_id)), None)
+        if not row:
+            return normalize_order_result(order_id=order_id, requested_quantity=max(0, requested_quantity),
+                filled_quantity=None, broker_state="UNKNOWN", reason="Order not found in FYERS orderbook")
+        req = exact_int(row.get("qty", row.get("quantity", requested_quantity)))
+        filled = row.get("filledQty", row.get("filled_qty", row.get("tradedQty")))
+        state = self._state_label(row.get("status", row.get("orderStatus", "")))
+        if req is None:
+            req = max(0, requested_quantity)
+        return normalize_order_result(order_id=order_id, requested_quantity=req,
+            filled_quantity=filled, broker_state=state,
+            reason=str(row.get("message", row.get("statusMessage", ""))),
+            average_fill_price=row.get("tradedPrice", row.get("avgPrice", 0)))
 
-    def cancel_order(self, order_id: str):
-        return self.api.cancel_order(data={"id": str(order_id)})
+    def cancel_order(self, order_id: str, requested_quantity: int = 0) -> OrderResult:
+        api = self._ensure_api()
+        try:
+            ack = api.cancel_order(data={"id": str(order_id)})
+        except Exception as exc:
+            self._poisoned = True
+            return normalize_order_result(order_id=order_id, requested_quantity=max(0, requested_quantity),
+                filled_quantity=None, broker_state="UNKNOWN", reason=f"cancel outcome ambiguous: {type(exc).__name__}")
+        # A cancel acknowledgement is not proof the order is cancelled; inspect orderbook.
+        time.sleep(0.25)
+        return self.get_order_status(order_id, requested_quantity)
 
-    def list_open_orders(self):
-        book = self.api.orderbook()
+    def list_open_orders(self) -> BrokerQueryResult[OpenOrder]:
+        api = self._ensure_api()
+        book = api.orderbook()
         if not isinstance(book, dict) or str(book.get("s", "")).lower() != "ok":
-            return BrokerQueryResult(ok=False, error=f"FYERS orderbook response: {book!r}")
+            return BrokerQueryResult.indeterminate(f"FYERS orderbook response: {book!r}")
         rows = book.get("orderBook", book.get("data", []))
         open_states = {"PENDING", "OPEN", "TRANSIT", "VALIDATION PENDING", "PUT ORDER REQ RECEIVED"}
-        return BrokerQueryResult(ok=True, data=[r for r in rows if str(r.get("status", "")).upper() in open_states])
+        result = []
+        for row in rows:
+            state = self._state_label(row.get("status", row.get("orderStatus", "")))
+            if state not in open_states:
+                continue
+            req = exact_int(row.get("qty", row.get("quantity")))
+            filled = exact_int(row.get("filledQty", row.get("filled_qty", row.get("tradedQty", 0))))
+            if req is None or filled is None or req < filled or req < 0 or filled < 0:
+                return BrokerQueryResult.indeterminate("Unparseable FYERS open-order quantities")
+            result.append(OpenOrder(str(row.get("id", "")), str(row.get("symbol", "")),
+                str(row.get("side", "")), req, filled, req-filled, state))
+        return BrokerQueryResult.success(result)
 
-    def list_open_positions(self):
-        resp = self.api.positions()
+    def list_open_positions(self) -> BrokerQueryResult[OpenPosition]:
+        resp = self._ensure_api().positions()
         if not isinstance(resp, dict) or str(resp.get("s", "")).lower() != "ok":
-            return BrokerQueryResult(ok=False, error=f"FYERS positions response: {resp!r}")
+            return BrokerQueryResult.indeterminate(f"FYERS positions response: {resp!r}")
         rows = resp.get("netPositions", resp.get("positions", []))
-        return BrokerQueryResult(ok=True, data=rows)
+        result = []
+        for row in rows:
+            qty = exact_int(row.get("netQty", row.get("netqty", row.get("quantity"))))
+            if qty is None:
+                return BrokerQueryResult.indeterminate("Unparseable FYERS net-position quantity")
+            if qty:
+                result.append(OpenPosition(str(row.get("symbol", row.get("tradingSymbol", ""))),
+                    qty, str(row.get("productType", row.get("product_type", "INTRADAY"))),
+                    str(row.get("state", "OPEN"))))
+        return BrokerQueryResult.success(result)
 
     def recover_after_reconciliation(self):
         self._poisoned = False
@@ -174,7 +239,9 @@ class FyersExecutionClient:
             return str(response.get("id", response.get("order_id", "")))
         return ""
 
-    def logout(self):
-        return None
+    def logout(self) -> dict[str, Any]:
+        self.is_logged_in = False
+        self.api = None
+        return {"status": "success", "message": "FYERS local session cleared"}
 
-fyers_execution_client = FyersExecutionClient
+fyers_execution_client = FyersExecutionClient()
