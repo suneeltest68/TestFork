@@ -102,20 +102,46 @@ class EmaTrendStrategy(private val config: EmaConfig = EmaConfig()) {
             val strength11 = if (slope11 != null && a != null && a != 0.0) slope11 / a else null
             val strength18 = if (slope18 != null && a != null && a != 0.0) slope18 / a else null
             val candle = candles[i]
-            val long = valid && candle.close > e4!! && candle.close > e11!! && candle.close > e18!! &&
-                e4 > e11 && e11 > e18 && distance!! > config.distanceAtrMultiplier * a!! &&
-                slope18!! > 0 && slope11!! > 0 &&
-                slope18 >= config.ema18SlopeAtrMultiplier * a &&
-                slope11 >= config.ema11SlopeAtrMultiplier * a &&
-                strength11!! > strength18!! && deltaNow!! > deltaPrev!! &&
-                dx!! > config.adxThreshold && range > 0 && bodyRatio >= config.fullBodyMinRatio
-            val short = valid && candle.close < e4!! && candle.close < e11!! && candle.close < e18!! &&
-                e4 < e11 && e11 < e18 && distance!! < -config.distanceAtrMultiplier * a!! &&
-                slope18!! < 0 && slope11!! < 0 &&
-                slope18 <= -config.ema18SlopeAtrMultiplier * a &&
-                slope11 <= -config.ema11SlopeAtrMultiplier * a &&
-                strength11!! < strength18!! && deltaNow!! < deltaPrev!! &&
-                dx!! > config.adxThreshold && range > 0 && bodyRatio >= config.fullBodyMinRatio
+            val long = if (!valid) false else {
+                val fast = e4!!
+                val mid = e11!!
+                val slow = e18!!
+                val atrValue = a!!
+                val slopeMid = slope11!!
+                val slopeSlow = slope18!!
+                val strengthMid = strength11!!
+                val strengthSlow = strength18!!
+                val deltaCurrent = deltaNow!!
+                val deltaPrevious = deltaPrev!!
+                val adxValue = dx!!
+                candle.close > fast && candle.close > mid && candle.close > slow &&
+                    fast > mid && mid > slow && distance!! > config.distanceAtrMultiplier * atrValue &&
+                    slopeSlow > 0 && slopeMid > 0 &&
+                    slopeSlow >= config.ema18SlopeAtrMultiplier * atrValue &&
+                    slopeMid >= config.ema11SlopeAtrMultiplier * atrValue &&
+                    strengthMid > strengthSlow && deltaCurrent > deltaPrevious &&
+                    adxValue > config.adxThreshold && range > 0 && bodyRatio >= config.fullBodyMinRatio
+            }
+            val short = if (!valid) false else {
+                val fast = e4!!
+                val mid = e11!!
+                val slow = e18!!
+                val atrValue = a!!
+                val slopeMid = slope11!!
+                val slopeSlow = slope18!!
+                val strengthMid = strength11!!
+                val strengthSlow = strength18!!
+                val deltaCurrent = deltaNow!!
+                val deltaPrevious = deltaPrev!!
+                val adxValue = dx!!
+                candle.close < fast && candle.close < mid && candle.close < slow &&
+                    fast < mid && mid < slow && distance!! < -config.distanceAtrMultiplier * atrValue &&
+                    slopeSlow < 0 && slopeMid < 0 &&
+                    slopeSlow <= -config.ema18SlopeAtrMultiplier * atrValue &&
+                    slopeMid <= -config.ema11SlopeAtrMultiplier * atrValue &&
+                    strengthMid < strengthSlow && deltaCurrent < deltaPrevious &&
+                    adxValue > config.adxThreshold && range > 0 && bodyRatio >= config.fullBodyMinRatio
+            }
 
             IndicatorCandle(candle, e4, e11, e18, a, dx, slope11, slope18,
                 strength11, strength18, deltaNow, deltaPrev, long, short)
