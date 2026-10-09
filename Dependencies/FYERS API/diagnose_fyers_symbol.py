@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -19,7 +18,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         client = FyersMarketDataClient()
-        profile = client.validate_session()
+        client.validate_session()
         print("FYERS profile OK")
         if args.right and args.strike is not None and args.expiry:
             from datetime import date
