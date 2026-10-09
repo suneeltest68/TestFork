@@ -19839,30 +19839,36 @@ def main() -> None:
     )
     os.chdir(ROOT_DIR)
 
-    # Credentials must come from `.env` (or the shell env). We never carry
-    # in-code defaults for these because they are secrets.
-    if not CLIENT_CODE or not ACCESS_TOKEN:
-        raise ValueError(
-            "DHAN_CLIENT_CODE and DHAN_ACCESS_TOKEN must be set in "
-            "Multithreading/Dependencies/.env. If you have an API Key + "
-            "API Secret but no access token yet, run:\n"
-            "    python Multithreading/Dependencies/dhan_token_setup.py"
-        )
-
-    # Fail fast if the access token is invalid / expired. The user_profile
-    # endpoint is cheap and gives us a clear early error instead of a
-    # confusing failure inside an OHLC fetch later.
-    try:
-        DhanLogin(CLIENT_CODE).user_profile(ACCESS_TOKEN)
-    except Exception as exc:
-        raise ValueError(
-            "DHAN_ACCESS_TOKEN failed validation against /v2/profile: "
-            f"{exc}\nIf the token has expired, regenerate it with:\n"
-            "    python Multithreading/Dependencies/dhan_token_setup.py"
-        ) from exc
+    # FYERS is the default market-data path for this migration. Legacy
+    # Dhan credentials are required only when another broker is explicitly selected.
+    if LIVE_BROKER == "FYERS":
+        if FyersMarketDataClient is None:
+            raise RuntimeError("FYERS market-data adapter unavailable; install fyers-apiv3.")
+        if not _env_str("FYERS_APP_ID", "") or not _env_str("FYERS_ACCESS_TOKEN", ""):
+            raise ValueError(
+                "FYERS_APP_ID and FYERS_ACCESS_TOKEN must be set in Dependencies/.env. "
+                "Run: python Dependencies/fyers_token_setup.py"
+            )
+        try:
+            FyersMarketDataClient().validate_session()
+        except Exception as exc:
+            raise ValueError(f"FYERS credentials failed /profile validation: {exc}") from exc
+    else:
+        if not CLIENT_CODE or not ACCESS_TOKEN:
+            raise ValueError(
+                "DHAN_CLIENT_CODE and DHAN_ACCESS_TOKEN must be set when LIVE_BROKER "
+                "is not FYERS. For FYERS run: python Dependencies/fyers_token_setup.py"
+            )
+        try:
+            DhanLogin(CLIENT_CODE).user_profile(ACCESS_TOKEN)
+        except Exception as exc:
+            raise ValueError(
+                f"DHAN_ACCESS_TOKEN failed validation: {exc}. Refresh with "
+                "Dependencies/dhan_token_setup.py"
+            ) from exc
 
     logger.info(
-        "Starting NIFTY Multi Strategy MASTER paper runner (broker=%s) | "
+        "Starting NIFTY Multi Strategy MASTER paper runner (dhanhq/FYERS) | "
         "ATM single-leg family (24): 10 core - Renko 1m, EMA 5m, HeikinAshi 1m, "
         "ProfitShooter 5m, Goldmine 5m, MoneyMachine 5m, OpeningStrike 5m "
         "PCR/VWAP/ATR, CPR 5m, CPR Algo 3 5m (multi-instrument), CPR Algo 4 5m (SRSI/VWAP); "
@@ -19877,7 +19883,11 @@ def main() -> None:
         SIGNAL_GEN_WORKERS[0].derived_timeframe_minutes,
     )
 
-    broker = DhanBrokerClient(CLIENT_CODE, ACCESS_TOKEN)
+    broker = (
+        FyersMarketDataClient()
+        if LIVE_BROKER == "FYERS"
+        else DhanBrokerClient(CLIENT_CODE, ACCESS_TOKEN)
+    )
     store = SharedMarketDataStore()
     stop_event = threading.Event()
 
