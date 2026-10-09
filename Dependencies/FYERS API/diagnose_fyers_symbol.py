@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT))
 from fyers_market_data import FyersMarketDataClient  # noqa: E402
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("right", nargs="?", choices=("CE", "PE"))
@@ -31,6 +32,7 @@ def main() -> int:
     except Exception as exc:
         print(f"FYERS diagnostic failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
