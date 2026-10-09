@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import sys
 
@@ -5,8 +7,6 @@ ROOT = Path(__file__).resolve().parents[3]
 FYERS_DIR = ROOT / "Dependencies" / "FYERS API"
 sys.path.insert(0, str(FYERS_DIR))
 sys.path.insert(0, str(ROOT))
-
-from __future__ import annotations
 
 import os
 
