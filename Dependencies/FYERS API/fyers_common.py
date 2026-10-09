@@ -22,6 +22,16 @@ MASTER_URLS = {
     "NSE_CM": "https://public.fyers.in/sym_details/NSE_CM_sym_master.json",
 }
 MASTER_CACHE = Path(os.getenv("FYERS_SYMBOL_CACHE", "Dependencies/fyers_symbol_cache"))
+
+def legacy_instrument_csv() -> Path | None:
+    configured = os.getenv("FYERS_LEGACY_INSTRUMENT_CSV", "").strip()
+    if configured:
+        path = Path(configured)
+        if path.is_file():
+            return path
+    root = Path(__file__).resolve().parents[1]
+    candidates = sorted(root.glob("all_instrument*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
 INDEX_ALIASES = {
     "13": ("NIFTY", "NSE:NIFTY50-INDEX"),
     "25": ("BANKNIFTY", "NSE:NIFTYBANK-INDEX"),
