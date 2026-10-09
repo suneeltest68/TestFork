@@ -1612,7 +1612,7 @@ def _select_execution_client(broker_name: str):
     return None, "", "INTRADAY"
 
 
-# Pick the active broker from .env (default KOTAK). The rest of the runner only
+# Pick the active broker from .env (default FYERS for this migration). The rest of the runner only
 # touches these three generic values. INTRADAY is same-day; NORMAL is carry-forward.
 LIVE_BROKER = _env_str("LIVE_BROKER", "FYERS").upper().strip() or "FYERS"
 execution_client, LIVE_EXCHANGE_SEGMENT, LIVE_PRODUCT_TYPE = _select_execution_client(
