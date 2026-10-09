@@ -17936,6 +17936,20 @@ def _configure_startup_live_trading(
     store.startup_exposure_audit = None
     store.live_session_started = False
 
+    # FYERS order placement requires an eligible API app and whitelisted static
+    # IP under the current broker rules. This is a second, independent gate:
+    # paper mode and market-data access do not require this acknowledgement.
+    if (
+        LIVE_BROKER == "FYERS"
+        and not _env_bool("FYERS_LIVE_COMPLIANCE_CONFIRMED", False)
+    ):
+        logger.warning(
+            "FYERS live trading remains disabled: confirm compliant API app and "
+            "whitelisted static IP with FYERS before setting "
+            "FYERS_LIVE_COMPLIANCE_CONFIRMED=true."
+        )
+        return 0, None
+
     candidate_live_workers: list[BasePaperStrategyWorker] = []
     invalid_live_evidence: list[str] = []
     for worker in workers:
