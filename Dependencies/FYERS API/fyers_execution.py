@@ -27,11 +27,13 @@ from fyers_common import FyersSymbolMaster, legacy_instrument_csv  # noqa: E402
 
 LOG = logging.getLogger(__name__)
 
+
 def _env(key: str) -> str:
     value = os.getenv(key, "").strip()
     if not value:
         raise ValueError(f"{key} must be configured")
     return value
+
 
 class FyersExecutionClient:
     def __init__(self):
