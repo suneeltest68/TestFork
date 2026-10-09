@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from fyers_common import FyersSymbolMaster  # noqa: E402
 
 
+
 class StaticMaster(FyersSymbolMaster):
     def __init__(self, records):
         super().__init__()
@@ -19,6 +20,7 @@ class StaticMaster(FyersSymbolMaster):
 
     def load(self, segment: str, *, refresh: bool = False):
         return self.records[segment]
+
 
 
 def test_option_lookup_uses_exact_published_symbol():
@@ -33,6 +35,7 @@ def test_option_lookup_uses_exact_published_symbol():
         "NSE_CM": [],
     })
     assert master.option_symbol("NIFTY", date(2026, 10, 27), 26000, "CE") == "NSE:NIFTY26OCT26000CE"
+
 
 
 def test_option_lookup_fails_closed_when_symbol_is_ambiguous():
