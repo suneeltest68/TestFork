@@ -1,0 +1,26 @@
+services:
+  - type: worker
+    name: ema-fyers-telegram
+    runtime: python
+    rootDir: ema_fyers_telegram
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: FYERS_APP_ID
+        sync: false
+      - key: FYERS_ACCESS_TOKEN
+        sync: false
+      - key: FYERS_SYMBOL
+        value: NSE:NIFTY50-INDEX
+      - key: FYERS_RESOLUTION
+        value: "5"
+      - key: POLL_SECONDS
+        value: "30"
+      - key: HISTORY_DAYS
+        value: "10"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_ENABLED
+        value: "true"
