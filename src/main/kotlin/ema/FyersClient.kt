@@ -28,9 +28,9 @@ data class FyersConfig(
     companion object {
         fun fromEnvironment(): FyersConfig {
             loadDotEnv()
-            val appId = System.getenv("FYERS_APP_ID")?.trim().orEmpty()
-            val token = System.getenv("FYERS_ACCESS_TOKEN")?.trim().orEmpty()
-            val symbol = System.getenv("FYERS_SYMBOL")?.trim().takeUnless { it.isNullOrBlank() } ?: "NSE:NIFTY50-INDEX"
+            val appId = env("FYERS_APP_ID")?.trim().orEmpty()
+            val token = env("FYERS_ACCESS_TOKEN")?.trim().orEmpty()
+            val symbol = env("FYERS_SYMBOL")?.trim().takeUnless { it.isNullOrBlank() } ?: "NSE:NIFTY50-INDEX"
             require(appId.isNotBlank()) { "Set FYERS_APP_ID in .env or environment" }
             require(token.isNotBlank()) { "Set FYERS_ACCESS_TOKEN in .env or environment" }
             return FyersConfig(appId, token, symbol)
