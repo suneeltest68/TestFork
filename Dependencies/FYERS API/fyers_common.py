@@ -62,11 +62,13 @@ def _expiry(record: dict[str, Any]) -> date | None:
             return datetime.fromtimestamp(number, timezone.utc).astimezone(ZoneInfo('Asia/Kolkata')).date()
     except (TypeError, ValueError, OverflowError):
         pass
+    text_value = str(raw).strip()
     for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d-%m-%Y", "%Y%m%d"):
-        try:
-            return datetime.strptime(str(raw)[:10], fmt).date()
-        except ValueError:
-            continue
+        for candidate in (text_value, text_value[:10]):
+            try:
+                return datetime.strptime(candidate, fmt).date()
+            except ValueError:
+                continue
     return None
 
 
@@ -100,11 +102,13 @@ class FyersSymbolMaster:
         if isinstance(payload, dict):
             records = payload.get("data", payload.get("symbols"))
             if records is None:
-                # The published JSON masters may be keyed by the exact ticker
-                # rather than wrapped in a top-level list.
+                records = payload
+            if isinstance(records, dict):
+                # Public masters are sometimes keyed by ticker, either directly
+                # or under a top-level "data" object.
                 records = [
                     ({"symTicker": key, **value} if isinstance(value, dict) else None)
-                    for key, value in payload.items()
+                    for key, value in records.items()
                 ]
         else:
             records = payload
