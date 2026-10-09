@@ -290,6 +290,19 @@ import requests
 # when MARKET_DATA_SOURCE=WEBSOCKET selects the tick-driven producer below.
 from dhanhq import DhanContext, DhanLogin, MarketFeed, dhanhq
 
+# FYERS modules live in a folder containing spaces; expose that directory for
+# their shared helper imports. Importing these adapters performs no login/order.
+_FYERS_DIR = Path(__file__).resolve().parent / "Dependencies" / "FYERS API"
+if str(_FYERS_DIR) not in sys.path:
+    sys.path.insert(0, str(_FYERS_DIR))
+try:
+    from fyers_market_data import FyersMarketDataClient
+except Exception as _fyers_data_import_exc:
+    FyersMarketDataClient = None
+    logging.getLogger(__name__).warning(
+        "FYERS market-data adapter unavailable: %s", _fyers_data_import_exc
+    )
+
 from Dependencies import dashboard_history, dashboard_indicators, dashboard_snapshot
 from Dependencies.broker_contract import ExecutionClient, OrderResult, OrderStatus
 from Dependencies.dashboard_server import DashboardEventSink, DashboardServer, start_dashboard
@@ -1554,6 +1567,18 @@ except Exception as _dhan_import_exc:
         _dhan_import_exc,
     )
 
+try:
+    _fyers_execution_module = load_module(
+        "master_fyers_execution", _FYERS_DIR / "fyers_execution.py"
+    )
+    fyers_execution_client = _fyers_execution_module.fyers_execution_client
+except Exception as _fyers_import_exc:
+    fyers_execution_client = None
+    logging.getLogger(LOGGER_NAME).warning(
+        "FYERS execution layer unavailable (%s); FYERS live trading disabled.",
+        _fyers_import_exc,
+    )
+
 
 def _select_execution_client(broker_name: str):
     """Return client, exchange, and product for one explicit broker selection.
@@ -1589,7 +1614,7 @@ def _select_execution_client(broker_name: str):
 
 # Pick the active broker from .env (default KOTAK). The rest of the runner only
 # touches these three generic values. INTRADAY is same-day; NORMAL is carry-forward.
-LIVE_BROKER = _env_str("LIVE_BROKER", "KOTAK").upper().strip() or "KOTAK"
+LIVE_BROKER = _env_str("LIVE_BROKER", "FYERS").upper().strip() or "FYERS"
 execution_client, LIVE_EXCHANGE_SEGMENT, LIVE_PRODUCT_TYPE = _select_execution_client(
     LIVE_BROKER
 )
