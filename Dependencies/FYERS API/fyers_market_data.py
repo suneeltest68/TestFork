@@ -10,7 +10,6 @@ import logging
 import os
 import queue
 import threading
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -146,7 +145,6 @@ class FyersMarketDataClient:
             if right not in ("CE", "PE"):
                 continue
             side = "ce" if right == "CE" else "pe"
-            greeks = {key: item.get(key) for key in ("delta", "gamma", "theta", "vega", "iv")}
             chain.setdefault(str(strike), {})[side] = {
                 "last_price": ltp, "implied_volatility": item.get("iv", 0),
                 "greeks": {"delta": item.get("delta"), "gamma": item.get("gamma"),
