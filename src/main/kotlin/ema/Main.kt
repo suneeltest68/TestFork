@@ -23,7 +23,19 @@ fun main(args: Array<String>) {
 }
 
 private fun runBacktest(args: List<String>) {
-    val options = args.chunked(2).filter { it.size == 2 }.associate { it[0] to it[1] }
+    val options = mutableMapOf<String, String>()
+    var index = 0
+    while (index < args.size) {
+        val key = args[index]
+        if (key == "--fyers") {
+            options[key] = "true"
+            index++
+        } else {
+            require(index + 1 < args.size) { "Missing value for $key" }
+            options[key] = args[index + 1]
+            index += 2
+        }
+    }
     val candles = when {
         options.containsKey("--csv") -> Backtest.readCsv(Path.of(options.getValue("--csv")))
         options.containsKey("--fyers") -> {
