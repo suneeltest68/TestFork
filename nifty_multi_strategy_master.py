@@ -19780,11 +19780,11 @@ def main() -> None:
 
     access_token = load_persisted_access_token(FYERS_TOKEN_FILE, FYERS_ACCESS_TOKEN)
     add_redaction_secrets(logging.getLogger(), (access_token,))
-    if not FYERS_CLIENT_ID or not access_token:
+    if not FYERS_CLIENT_ID or (not access_token and not FYERS_TELEGRAM_AUTH_ENABLED):
         raise ValueError(
             "FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN must be set in "
-            "Dependencies/.env, or an initial Fyers token must be present in "
-            f"{FYERS_TOKEN_FILE}."
+            "Dependencies/.env or an initial Fyers token must be present in "
+            f"{FYERS_TOKEN_FILE}, unless FYERS_TELEGRAM_AUTH_ENABLED=true."
         )
     if FYERS_TELEGRAM_AUTH_ENABLED:
         missing_auth_settings = [
@@ -19809,6 +19809,8 @@ def main() -> None:
         INSTRUMENT_MASTER_GLOB,
         ROOT_DIR / "Dependencies" / "fyers_nse_fo.csv",
         request_timeout_seconds=MARKET_DATA_HTTP_TIMEOUT_SECONDS,
+        allow_missing_access_token=FYERS_TELEGRAM_AUTH_ENABLED,
+        load_symbol_mappings=bool(access_token),
     )
     fyers_auth_service: FyersTelegramAuthService | None = None
     if FYERS_TELEGRAM_AUTH_ENABLED:
@@ -19824,20 +19826,12 @@ def main() -> None:
         )
         fyers_auth_service.start()
 
-    try:
+    if fyers_auth_service is not None:
+        fyers_auth_service.authenticate_startup(has_access_token=bool(access_token))
+        if not access_token:
+            broker.load_symbol_mappings()
+    else:
         broker.validate_session()
-    except RuntimeError:
-        if fyers_auth_service is None:
-            raise
-        logger.warning(
-            "Fyers access token is invalid or expired. Waiting for /auth approval "
-            "through the Telegram callback before starting market-data workers."
-        )
-        fyers_auth_service.request_authorization(
-            "The Fyers access token is invalid or expired."
-        )
-        fyers_auth_service.wait_for_token()
-        logger.info("A valid Fyers access token was received; continuing startup.")
 
     logger.info(
         "Starting NIFTY Multi Strategy MASTER paper runner (Fyers market data) | "

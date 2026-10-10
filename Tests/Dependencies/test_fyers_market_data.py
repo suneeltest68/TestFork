@@ -374,6 +374,32 @@ def test_invalid_fyers_credentials_are_rejected_before_client_creation(tmp_path)
         )
 
 
+def test_missing_fyers_token_is_only_allowed_for_deferred_auth(tmp_path):
+    fyers_master, dhan_master = _symbol_masters()
+
+    with pytest.raises(ValueError, match="FYERS_ACCESS_TOKEN"):
+        FyersMarketDataClient(
+            "APP-ID",
+            "",
+            str(tmp_path / "all_instrument *.csv"),
+            tmp_path / "fyers_nse_fo.csv",
+            symbol_master_frame=fyers_master,
+            dhan_master_frame=dhan_master,
+        )
+
+    client = FyersMarketDataClient(
+        "APP-ID",
+        "",
+        str(tmp_path / "all_instrument *.csv"),
+        tmp_path / "fyers_nse_fo.csv",
+        symbol_master_frame=fyers_master,
+        dhan_master_frame=dhan_master,
+        allow_missing_access_token=True,
+    )
+    with pytest.raises(RuntimeError, match="No Fyers access token"):
+        client.validate_session()
+
+
 def test_fyers_sdk_requests_receive_a_finite_default_timeout(tmp_path):
     fyers_master, dhan_master = _symbol_masters()
     original_request = Mock(return_value="response")

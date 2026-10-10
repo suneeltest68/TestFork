@@ -1,0 +1,22 @@
+.git
+.github
+.pytest_cache
+.ruff_cache
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+*.log
+.env
+.env.*
+Dependencies/.env
+Dependencies/.env.*
+Dependencies/gsheet_oauth_*.json
+Dependencies/session_state*.json
+Dependencies/session_state*.json.tmp
+Dependencies/all_instrument*.csv
+Dependencies/fyers_nse_fo.csv
+Backtest Outputs
+Tests
+docs

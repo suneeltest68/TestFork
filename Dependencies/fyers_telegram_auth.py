@@ -199,6 +199,22 @@ class FyersTelegramAuthService:
         """Block startup until a callback installs and persists a valid access token."""
         self._token_updated.wait()
 
+    def authenticate_startup(self, *, has_access_token: bool) -> None:
+        """Validate an existing token or wait for first-time Telegram OAuth approval."""
+        if has_access_token:
+            try:
+                self.market_data_client.validate_session()
+                return
+            except RuntimeError:
+                reason = "The Fyers access token is invalid or expired."
+        else:
+            reason = "First-time setup: approve Fyers access to start the trading service."
+
+        _LOGGER.warning("%s Waiting for Telegram-authorized Fyers access.", reason)
+        self.request_authorization(reason)
+        self.wait_for_token()
+        _LOGGER.info("Fyers access token approved and validated; continuing startup.")
+
     def _handle_callback(self, request_target: str) -> None:
         query = parse_qs(urlsplit(request_target).query, max_num_fields=8)
         state_values = query.get("state", [])

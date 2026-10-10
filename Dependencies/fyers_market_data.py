@@ -90,10 +90,11 @@ class FyersMarketDataClient:
         dhan_master_frame: pd.DataFrame | None = None,
         request_timeout_seconds: float = 10.0,
         load_symbol_mappings: bool = True,
+        allow_missing_access_token: bool = False,
     ) -> None:
         self.client_id = str(client_id).strip()
         self.access_token = str(access_token).strip()
-        if not self.client_id or not self.access_token:
+        if not self.client_id or (not self.access_token and not allow_missing_access_token):
             raise ValueError("FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN must be configured.")
         if not math.isfinite(request_timeout_seconds) or request_timeout_seconds <= 0:
             raise ValueError("Fyers HTTP timeout must be a finite, positive number.")
@@ -102,8 +103,9 @@ class FyersMarketDataClient:
         self.fyers_symbol_master_path = Path(fyers_symbol_master_path)
         self._credential_lock = threading.RLock()
         self._token_version = 0
-        self._model = model or self._create_model(self.access_token)
-        self._install_request_timeout(self._model)
+        self._model = model or (self._create_model(self.access_token) if self.access_token else None)
+        if self._model is not None:
+            self._install_request_timeout(self._model)
         self._symbol_by_dhan_id: dict[int, str] = dict(FYERS_INDEX_SYMBOLS)
         self._identity_by_symbol: dict[str, tuple[str, int]] = {
             symbol: ("IDX_I", security_id) for security_id, symbol in FYERS_INDEX_SYMBOLS.items()
@@ -111,7 +113,15 @@ class FyersMarketDataClient:
         self._expiry_timestamp_by_date: dict[date, int] = {}
         self._last_history_request_at = 0.0
         if load_symbol_mappings:
-            self._load_symbol_mappings(symbol_master_frame, dhan_master_frame)
+            self.load_symbol_mappings(symbol_master_frame, dhan_master_frame)
+
+    def load_symbol_mappings(
+        self,
+        symbol_master_frame: pd.DataFrame | None = None,
+        dhan_master_frame: pd.DataFrame | None = None,
+    ) -> None:
+        """Load provider contract mappings after deferred first-time OAuth, if needed."""
+        self._load_symbol_mappings(symbol_master_frame, dhan_master_frame)
 
     def _install_request_timeout(self, model: Any) -> None:
         """Bound every synchronous SDK HTTP request, including redirects."""
@@ -146,14 +156,21 @@ class FyersMarketDataClient:
 
     def validate_session(self) -> None:
         """Fail early if the configured Fyers access token is invalid or expired."""
-        with self._credential_lock:
-            model = self._model
+        model = self._current_model()
         response = model.get_profile()
         if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
             detail = (
                 response.get("message", "invalid response") if isinstance(response, dict) else type(response).__name__
             )
             raise RuntimeError(f"Fyers access-token validation failed: {detail}")
+
+    def _current_model(self) -> Any:
+        """Return the installed SDK client or fail clearly while awaiting OAuth."""
+        with self._credential_lock:
+            model = self._model
+        if model is None:
+            raise RuntimeError("No Fyers access token is installed.")
+        return model
 
     @property
     def token_version(self) -> int:
@@ -390,8 +407,7 @@ class FyersMarketDataClient:
         }
         for attempt in range(FYERS_HISTORY_BAD_REQUEST_RETRIES + 1):
             self._wait_for_history_request_slot()
-            with self._credential_lock:
-                model = self._model
+            model = self._current_model()
             response = model.history(data=request)
             self._last_history_request_at = time.monotonic()
             if (
@@ -568,8 +584,7 @@ class FyersMarketDataClient:
         symbols = list(requested)
         for start in range(0, len(symbols), FYERS_QUOTE_BATCH_SIZE):
             batch = symbols[start : start + FYERS_QUOTE_BATCH_SIZE]
-            with self._credential_lock:
-                model = self._model
+            model = self._current_model()
             response = model.quotes(data={"symbols": ",".join(batch)})
             if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
                 detail = (
@@ -616,8 +631,7 @@ class FyersMarketDataClient:
         expiry_timestamp = self._expiry_timestamp_by_date.get(expiry)
         if expiry_timestamp is None:
             raise ValueError(f"Fyers contract master has no expiry timestamp for {expiry}.")
-        with self._credential_lock:
-            model = self._model
+        model = self._current_model()
         response = model.optionchain(
             data={
                 "symbol": symbol,

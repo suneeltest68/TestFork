@@ -12,12 +12,15 @@ from Dependencies import fyers_telegram_auth as auth
 class _FakeMarketDataClient:
     def __init__(self) -> None:
         self.installed_token = None
+        self.session_valid = True
 
     def replace_access_token(self, token, *, persist):
         persist(token)
         self.installed_token = token
 
     def validate_session(self):
+        if not self.session_valid:
+            raise RuntimeError("invalid Fyers session")
         return None
 
 
@@ -84,6 +87,42 @@ def test_auth_callback_rejects_wrong_or_replayed_state(tmp_path, monkeypatch):
 
     service._httpd.server_close()
     exchange.assert_not_called()
+
+
+def test_first_start_requests_telegram_auth_and_waits_for_approval(tmp_path):
+    service = _service(tmp_path)
+    request_auth = Mock(side_effect=lambda _reason: service._token_updated.set())
+    service.request_authorization = request_auth
+
+    service.authenticate_startup(has_access_token=False)
+
+    request_auth.assert_called_once()
+    assert "First-time setup" in request_auth.call_args.args[0]
+    service._httpd.server_close()
+
+
+def test_startup_reauthenticates_invalid_token_before_continuing(tmp_path):
+    service = _service(tmp_path)
+    service.market_data_client.session_valid = False
+    request_auth = Mock(side_effect=lambda _reason: service._token_updated.set())
+    service.request_authorization = request_auth
+
+    service.authenticate_startup(has_access_token=True)
+
+    request_auth.assert_called_once()
+    assert "invalid or expired" in request_auth.call_args.args[0]
+    service._httpd.server_close()
+
+
+def test_startup_accepts_existing_valid_token_without_prompt(tmp_path):
+    service = _service(tmp_path)
+    request_auth = Mock()
+    service.request_authorization = request_auth
+
+    service.authenticate_startup(has_access_token=True)
+
+    request_auth.assert_not_called()
+    service._httpd.server_close()
 
 
 @pytest.mark.parametrize(

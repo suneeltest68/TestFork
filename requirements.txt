@@ -22,6 +22,11 @@
 # ---- LIVE RUNTIME (DEPS-001: the verified live-runner set) -------------------
 dhanhq==2.2.0
 fyers-apiv3==3.1.15
+# Fyers' SDK metadata pins older requests and websocket-client versions than
+# the audited versions below. The Docker image installs the SDK with --no-deps,
+# so pin the additional modules its runner-used REST/logger imports need.
+aiohttp==3.14.4
+aws-lambda-powertools==3.35.0
 pandas==3.0.6
 numpy==2.5.3
 backtesting==0.6.6
