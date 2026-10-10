@@ -290,6 +290,19 @@ import requests
 # when MARKET_DATA_SOURCE=WEBSOCKET selects the tick-driven producer below.
 from dhanhq import DhanContext, DhanLogin, MarketFeed, dhanhq
 
+# FYERS modules live in a folder containing spaces; expose that directory for
+# their shared helper imports. Importing these adapters performs no login/order.
+_FYERS_DIR = Path(__file__).resolve().parent / "Dependencies" / "FYERS API"
+if str(_FYERS_DIR) not in sys.path:
+    sys.path.insert(0, str(_FYERS_DIR))
+try:
+    from fyers_market_data import FyersMarketDataClient
+except Exception as _fyers_data_import_exc:
+    FyersMarketDataClient = None
+    logging.getLogger(__name__).warning(
+        "FYERS market-data adapter unavailable: %s", _fyers_data_import_exc
+    )
+
 from Dependencies import dashboard_history, dashboard_indicators, dashboard_snapshot
 from Dependencies.broker_contract import ExecutionClient, OrderResult, OrderStatus
 from Dependencies.dashboard_server import DashboardEventSink, DashboardServer, start_dashboard
@@ -607,7 +620,7 @@ FETCH_POLL_SECONDS = _env_int("FETCH_POLL_SECONDS", 2)
 #                true-up against Dhan's official candles).
 # Requires the paid Dhan Data API subscription in WEBSOCKET mode. Any value
 # other than exactly "WEBSOCKET" FAILS CLOSED to the battle-tested REST poller.
-MARKET_DATA_SOURCE = _env_str("MARKET_DATA_SOURCE", "REST").upper().strip() or "REST"
+MARKET_DATA_SOURCE = _env_str("MARKET_DATA_SOURCE", "WEBSOCKET").upper().strip() or "WEBSOCKET"
 
 # Seconds past each minute rollover before the websocket producer trues-up the
 # just-closed candle from REST (Dhan's official candle can lag a few seconds).
@@ -1554,6 +1567,18 @@ except Exception as _dhan_import_exc:
         _dhan_import_exc,
     )
 
+try:
+    _fyers_execution_module = load_module(
+        "master_fyers_execution", _FYERS_DIR / "fyers_execution.py"
+    )
+    fyers_execution_client = _fyers_execution_module.fyers_execution_client
+except Exception as _fyers_import_exc:
+    fyers_execution_client = None
+    logging.getLogger(LOGGER_NAME).warning(
+        "FYERS execution layer unavailable (%s); FYERS live trading disabled.",
+        _fyers_import_exc,
+    )
+
 
 def _select_execution_client(broker_name: str):
     """Return client, exchange, and product for one explicit broker selection.
@@ -1587,9 +1612,9 @@ def _select_execution_client(broker_name: str):
     return None, "", "INTRADAY"
 
 
-# Pick the active broker from .env (default KOTAK). The rest of the runner only
+# Pick the active broker from .env (default FYERS for this migration). The rest of the runner only
 # touches these three generic values. INTRADAY is same-day; NORMAL is carry-forward.
-LIVE_BROKER = _env_str("LIVE_BROKER", "KOTAK").upper().strip() or "KOTAK"
+LIVE_BROKER = _env_str("LIVE_BROKER", "FYERS").upper().strip() or "FYERS"
 execution_client, LIVE_EXCHANGE_SEGMENT, LIVE_PRODUCT_TYPE = _select_execution_client(
     LIVE_BROKER
 )
@@ -4313,7 +4338,7 @@ class WebSocketMarketDataFetcher(threading.Thread):
             desired[(segment, security_id)] = (
                 feed_code,
                 str(security_id),
-                MarketFeed.Ticker,
+                getattr(MarketFeed, "Ticker", 15),
             )
         return desired
 
@@ -17936,6 +17961,20 @@ def _configure_startup_live_trading(
     store.startup_exposure_audit = None
     store.live_session_started = False
 
+    # FYERS order placement requires an eligible API app and whitelisted static
+    # IP under the current broker rules. This is a second, independent gate:
+    # paper mode and market-data access do not require this acknowledgement.
+    if (
+        LIVE_BROKER == "FYERS"
+        and not _env_bool("FYERS_LIVE_COMPLIANCE_CONFIRMED", False)
+    ):
+        logger.warning(
+            "FYERS live trading remains disabled: confirm compliant API app and "
+            "whitelisted static IP with FYERS before setting "
+            "FYERS_LIVE_COMPLIANCE_CONFIRMED=true."
+        )
+        return 0, None
+
     candidate_live_workers: list[BasePaperStrategyWorker] = []
     invalid_live_evidence: list[str] = []
     for worker in workers:
@@ -19825,30 +19864,36 @@ def main() -> None:
     )
     os.chdir(ROOT_DIR)
 
-    # Credentials must come from `.env` (or the shell env). We never carry
-    # in-code defaults for these because they are secrets.
-    if not CLIENT_CODE or not ACCESS_TOKEN:
-        raise ValueError(
-            "DHAN_CLIENT_CODE and DHAN_ACCESS_TOKEN must be set in "
-            "Multithreading/Dependencies/.env. If you have an API Key + "
-            "API Secret but no access token yet, run:\n"
-            "    python Multithreading/Dependencies/dhan_token_setup.py"
-        )
-
-    # Fail fast if the access token is invalid / expired. The user_profile
-    # endpoint is cheap and gives us a clear early error instead of a
-    # confusing failure inside an OHLC fetch later.
-    try:
-        DhanLogin(CLIENT_CODE).user_profile(ACCESS_TOKEN)
-    except Exception as exc:
-        raise ValueError(
-            "DHAN_ACCESS_TOKEN failed validation against /v2/profile: "
-            f"{exc}\nIf the token has expired, regenerate it with:\n"
-            "    python Multithreading/Dependencies/dhan_token_setup.py"
-        ) from exc
+    # FYERS is the default market-data path for this migration. Legacy
+    # Dhan credentials are required only when another broker is explicitly selected.
+    if LIVE_BROKER == "FYERS":
+        if FyersMarketDataClient is None:
+            raise RuntimeError("FYERS market-data adapter unavailable; install fyers-apiv3.")
+        if not _env_str("FYERS_APP_ID", "") or not _env_str("FYERS_ACCESS_TOKEN", ""):
+            raise ValueError(
+                "FYERS_APP_ID and FYERS_ACCESS_TOKEN must be set in Dependencies/.env. "
+                "Run: python Dependencies/fyers_token_setup.py"
+            )
+        try:
+            FyersMarketDataClient().validate_session()
+        except Exception as exc:
+            raise ValueError(f"FYERS credentials failed /profile validation: {exc}") from exc
+    else:
+        if not CLIENT_CODE or not ACCESS_TOKEN:
+            raise ValueError(
+                "DHAN_CLIENT_CODE and DHAN_ACCESS_TOKEN must be set when LIVE_BROKER "
+                "is not FYERS. For FYERS run: python Dependencies/fyers_token_setup.py"
+            )
+        try:
+            DhanLogin(CLIENT_CODE).user_profile(ACCESS_TOKEN)
+        except Exception as exc:
+            raise ValueError(
+                f"DHAN_ACCESS_TOKEN failed validation: {exc}. Refresh with "
+                "Dependencies/dhan_token_setup.py"
+            ) from exc
 
     logger.info(
-        "Starting NIFTY Multi Strategy MASTER paper runner (dhanhq) | "
+        "Starting NIFTY Multi Strategy MASTER paper runner (dhanhq/FYERS) | "
         "ATM single-leg family (24): 10 core - Renko 1m, EMA 5m, HeikinAshi 1m, "
         "ProfitShooter 5m, Goldmine 5m, MoneyMachine 5m, OpeningStrike 5m "
         "PCR/VWAP/ATR, CPR 5m, CPR Algo 3 5m (multi-instrument), CPR Algo 4 5m (SRSI/VWAP); "
@@ -19863,7 +19908,11 @@ def main() -> None:
         SIGNAL_GEN_WORKERS[0].derived_timeframe_minutes,
     )
 
-    broker = DhanBrokerClient(CLIENT_CODE, ACCESS_TOKEN)
+    broker = (
+        FyersMarketDataClient()
+        if LIVE_BROKER == "FYERS"
+        else DhanBrokerClient(CLIENT_CODE, ACCESS_TOKEN)
+    )
     store = SharedMarketDataStore()
     stop_event = threading.Event()
 
