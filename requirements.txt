@@ -50,6 +50,9 @@ websocket-client==1.8.0
 # with must be pinned here rather than left to transitive resolution.
 websockets==17.1
 TA-Lib==0.6.8
+# The runner constructs the ML Ensemble worker as part of its default roster.
+# Keep its estimator dependency in the production image so startup cannot fail.
+scikit-learn==1.8.0
 
 # ---- DEVELOPMENT / CI QUALITY GATES -----------------------------------------
 # Versions mirror the Streamlit Scanner App's verified set where shared.
@@ -90,6 +93,3 @@ pandas-stubs==3.0.5.260914
 #   pip install -r requirements-ai.txt
 # This pins the Claude Agent SDK, the Codex runtime, and the MCP/schema stack
 # they share. Each strategy stays disabled when its half of the set is absent.
-#
-# ML Ensemble signal generator:
-#   scikit-learn==1.8.0
