@@ -298,6 +298,10 @@ from Dependencies.fyers_market_data import (
     FyersMarketDataClient,
     FyersMarketFeed,
 )
+from Dependencies.fyers_telegram_auth import (
+    FyersTelegramAuthService,
+    load_persisted_access_token,
+)
 from Dependencies.market_data_health import (
     MarketDataHealth,
     MarketDataValidationError,
@@ -309,6 +313,7 @@ from Dependencies.market_data_health import (
 from Dependencies.next_open_entry import PendingNextOpenEntry
 from Dependencies.risk_sizing import SizingDecision
 from Dependencies.secret_redaction import (
+    add_redaction_secrets,
     environment_secrets,
     install_redaction_filter,
     redact_text,
@@ -518,6 +523,12 @@ def _scaled_float(prefix: str, name: str, default: float) -> float:
 # =============================================================================
 FYERS_CLIENT_ID = _env_str("FYERS_CLIENT_ID", "")
 FYERS_ACCESS_TOKEN = _env_str("FYERS_ACCESS_TOKEN", "")
+FYERS_SECRET_KEY = _env_str("FYERS_SECRET_KEY", "")
+FYERS_REDIRECT_URI = _env_str("FYERS_REDIRECT_URI", "")
+FYERS_TELEGRAM_AUTH_ENABLED = _env_bool("FYERS_TELEGRAM_AUTH_ENABLED", False)
+FYERS_AUTH_TELEGRAM_CHAT_ID = _env_str("FYERS_AUTH_TELEGRAM_CHAT_ID", "").strip()
+FYERS_TOKEN_FILE = Path(_env_str("FYERS_TOKEN_FILE", "/data/fyers_access_token"))
+RAILWAY_PORT = _env_int("PORT", 8080)
 
 
 # =============================================================================
@@ -4549,6 +4560,11 @@ class WebSocketMarketDataFetcher(threading.Thread):
                 # full-window merge IS the gap backfill for missed ticks.
                 self._request_true_up("reconnect")
                 while not self.stop_event.is_set():
+                    if feed.token_version != self.broker.token_version:
+                        self.log.info(
+                            "Fyers access token changed; reconnecting the websocket feed."
+                        )
+                        break
                     self._handle_packet(feed.get_data())
             except Exception as exc:
                 if not self.stop_event.is_set():
@@ -19762,21 +19778,66 @@ def main() -> None:
     )
     os.chdir(ROOT_DIR)
 
-    if not FYERS_CLIENT_ID or not FYERS_ACCESS_TOKEN:
+    access_token = load_persisted_access_token(FYERS_TOKEN_FILE, FYERS_ACCESS_TOKEN)
+    add_redaction_secrets(logging.getLogger(), (access_token,))
+    if not FYERS_CLIENT_ID or not access_token:
         raise ValueError(
             "FYERS_CLIENT_ID and FYERS_ACCESS_TOKEN must be set in "
-            "Dependencies/.env. Generate an access token in the Fyers API "
-            "dashboard, then store it locally in that file."
+            "Dependencies/.env, or an initial Fyers token must be present in "
+            f"{FYERS_TOKEN_FILE}."
         )
+    if FYERS_TELEGRAM_AUTH_ENABLED:
+        missing_auth_settings = [
+            name
+            for name, value in (
+                ("FYERS_SECRET_KEY", FYERS_SECRET_KEY),
+                ("FYERS_REDIRECT_URI", FYERS_REDIRECT_URI),
+                ("FYERS_AUTH_TELEGRAM_CHAT_ID", FYERS_AUTH_TELEGRAM_CHAT_ID),
+                ("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN),
+            )
+            if not value
+        ]
+        if missing_auth_settings:
+            raise ValueError(
+                "FYERS_TELEGRAM_AUTH_ENABLED requires: "
+                + ", ".join(missing_auth_settings)
+            )
 
     broker = FyersMarketDataClient(
         FYERS_CLIENT_ID,
-        FYERS_ACCESS_TOKEN,
+        access_token,
         INSTRUMENT_MASTER_GLOB,
         ROOT_DIR / "Dependencies" / "fyers_nse_fo.csv",
         request_timeout_seconds=MARKET_DATA_HTTP_TIMEOUT_SECONDS,
     )
-    broker.validate_session()
+    fyers_auth_service: FyersTelegramAuthService | None = None
+    if FYERS_TELEGRAM_AUTH_ENABLED:
+        fyers_auth_service = FyersTelegramAuthService(
+            bot_token=TELEGRAM_BOT_TOKEN,
+            authorized_chat_id=FYERS_AUTH_TELEGRAM_CHAT_ID,
+            client_id=FYERS_CLIENT_ID,
+            secret_key=FYERS_SECRET_KEY,
+            redirect_uri=FYERS_REDIRECT_URI,
+            token_file=FYERS_TOKEN_FILE,
+            market_data_client=broker,
+            port=RAILWAY_PORT,
+        )
+        fyers_auth_service.start()
+
+    try:
+        broker.validate_session()
+    except RuntimeError:
+        if fyers_auth_service is None:
+            raise
+        logger.warning(
+            "Fyers access token is invalid or expired. Waiting for /auth approval "
+            "through the Telegram callback before starting market-data workers."
+        )
+        fyers_auth_service.request_authorization(
+            "The Fyers access token is invalid or expired."
+        )
+        fyers_auth_service.wait_for_token()
+        logger.info("A valid Fyers access token was received; continuing startup.")
 
     logger.info(
         "Starting NIFTY Multi Strategy MASTER paper runner (Fyers market data) | "
@@ -20173,6 +20234,11 @@ def main() -> None:
     fetcher.join(timeout=SHUTDOWN_JOIN_SECONDS)
     if telegram_worker is not None:
         telegram_worker.join(timeout=SHUTDOWN_JOIN_SECONDS)
+    if fyers_auth_service is not None:
+        try:
+            fyers_auth_service.stop(timeout=SHUTDOWN_JOIN_SECONDS)
+        except Exception:  # noqa: BLE001 - authentication service must not block finalization
+            logger.exception("Fyers Telegram authentication service did not stop cleanly.")
 
     supervised_threads = [fetcher, telegram_worker, *workers]
     alive_threads = [

@@ -89,7 +89,7 @@ Each subfolder has its own `Readme.md` with the details.
    ```
    python algo.py setup-fyers-token
    ```
-   The command prints an authorization URL. Open it in a browser, approve access, then paste the complete redirected URL back into the terminal. The command validates the OAuth state and writes `FYERS_ACCESS_TOKEN` into `.env`; it does not display the token. Fyers tokens may expire, so rerun this flow when the token is rejected. If you also choose Dhan for live order execution, fill its separate credential block and run:
+   The command prints an authorization URL. Open it in a browser, approve access, then paste the complete redirected URL back into the terminal. The command validates the OAuth state and writes `FYERS_ACCESS_TOKEN` into `.env`; it does not display the token. If you also choose Dhan for live order execution, fill its separate credential block and run:
    ```
    python "Dependencies/dhan_token_setup.py"
    ```
@@ -101,7 +101,10 @@ Each subfolder has its own `Readme.md` with the details.
    TELEGRAM_BOT_TOKEN=your_botfather_token
    TELEGRAM_CHAT_ID=@your_channel_or_-100xxxxxxxxxx
    ```
-   Create the bot via @BotFather and add it to your group/channel as an admin. Leave `TELEGRAM_ENABLED=false` (the default) to run without alerts. The token stays in `.env`, which is git-ignored.
+   Create the bot via @BotFather. If you also want trade alerts, add it to your group/channel as an admin. Leave `TELEGRAM_ENABLED=false` (the default) to use the bot only for authentication.
+5. (Optional) Enable Telegram-triggered Fyers token renewal on Railway. Deploy this repository as a single Railway service running `python algo.py run`, attach a Railway Volume mounted at `/data`, and expose Railway's `PORT`. Set the Fyers developer-app redirect URI to the service's public HTTPS domain plus `/callback/`, then set the exact same value in `FYERS_REDIRECT_URI`. Configure Railway variables `FYERS_TELEGRAM_AUTH_ENABLED=true`, `FYERS_TOKEN_FILE=/data/fyers_access_token`, `FYERS_AUTH_TELEGRAM_CHAT_ID` (your numeric private Telegram chat ID), `FYERS_CLIENT_ID`, `FYERS_SECRET_KEY`, an initial `FYERS_ACCESS_TOKEN`, and `TELEGRAM_BOT_TOKEN`. Start the bot in a private Telegram chat before using it.
+
+   Send `/auth` to the bot whenever you want a new Fyers authorization link. If Fyers rejects the saved token at startup, the service sends a fresh link automatically; it also checks the Fyers session periodically and sends a link when the current token is rejected. Tap the link and approve Fyers as usual. The callback validates a one-use OAuth state that expires after 10 minutes, validates the new token, atomically saves it on the volume, swaps the running REST client, and reconnects the WebSocket feed. The token itself is never sent in Telegram. Keep the service to one replica. Because the existing alert bot is reused, do not configure another `getUpdates` poller or webhook consumer for that bot token. This automates code exchange and token loading, not Fyers' required user approval; if approval or Telegram is unavailable, market data cannot renew.
 
 4b. (Optional) Turn on the read-only live dashboard by adding to the master file's `.env`:
    ```

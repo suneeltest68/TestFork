@@ -106,6 +106,35 @@ def test_fyers_history_maps_index_candles_to_runner_frame(tmp_path):
     assert fake.history_request["resolution"] == "1"
 
 
+def test_access_token_rotation_validates_persists_and_advances_websocket_generation(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    candidate = _FakeFyers()
+    monkeypatch.setattr(client, "_create_model", lambda _token: candidate)
+    persisted = []
+
+    client.replace_access_token("rotated-token", persist=persisted.append)
+
+    assert persisted == ["rotated-token"]
+    assert client.access_token == "rotated-token"
+    assert client.token_version == 1
+    client.validate_session()
+
+
+def test_access_token_rotation_does_not_persist_or_swap_an_invalid_token(tmp_path, monkeypatch):
+    client = _client(tmp_path)
+    candidate = _FakeFyers()
+    candidate.get_profile = lambda: {"s": "error", "message": "invalid token"}
+    monkeypatch.setattr(client, "_create_model", lambda _token: candidate)
+    persisted = []
+
+    with pytest.raises(RuntimeError, match="Fyers access-token validation failed"):
+        client.replace_access_token("invalid-token", persist=persisted.append)
+
+    assert persisted == []
+    assert client.access_token == "ACCESS-TOKEN"
+    assert client.token_version == 0
+
+
 def test_fyers_history_supports_five_second_option_candles(tmp_path):
     fake = _FakeFyers()
     client = FyersMarketDataClient(

@@ -7,6 +7,7 @@ import math
 import queue
 import threading
 import time
+from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -99,8 +100,10 @@ class FyersMarketDataClient:
         self.request_timeout_seconds = float(request_timeout_seconds)
         self.instrument_master_glob = str(instrument_master_glob)
         self.fyers_symbol_master_path = Path(fyers_symbol_master_path)
-        self._model = model or self._create_model()
-        self._install_request_timeout()
+        self._credential_lock = threading.RLock()
+        self._token_version = 0
+        self._model = model or self._create_model(self.access_token)
+        self._install_request_timeout(self._model)
         self._symbol_by_dhan_id: dict[int, str] = dict(FYERS_INDEX_SYMBOLS)
         self._identity_by_symbol: dict[str, tuple[str, int]] = {
             symbol: ("IDX_I", security_id) for security_id, symbol in FYERS_INDEX_SYMBOLS.items()
@@ -110,9 +113,9 @@ class FyersMarketDataClient:
         if load_symbol_mappings:
             self._load_symbol_mappings(symbol_master_frame, dhan_master_frame)
 
-    def _install_request_timeout(self) -> None:
+    def _install_request_timeout(self, model: Any) -> None:
         """Bound every synchronous SDK HTTP request, including redirects."""
-        service = getattr(self._model, "service", None)
+        service = getattr(model, "service", None)
         session = getattr(service, "session", None)
         original_request = getattr(session, "request", None)
         if not callable(original_request):
@@ -126,7 +129,7 @@ class FyersMarketDataClient:
 
         session.request = request_with_timeout
 
-    def _create_model(self) -> Any:
+    def _create_model(self, access_token: str) -> Any:
         """Build the official Fyers v3 REST client, reporting a clear missing-SDK error."""
         try:
             from fyers_apiv3 import fyersModel
@@ -136,19 +139,54 @@ class FyersMarketDataClient:
             ) from exc
         return fyersModel.FyersModel(
             client_id=self.client_id,
-            token=self.access_token,
+            token=access_token,
             is_async=False,
             log_path="",
         )
 
     def validate_session(self) -> None:
         """Fail early if the configured Fyers access token is invalid or expired."""
-        response = self._model.get_profile()
+        with self._credential_lock:
+            model = self._model
+        response = model.get_profile()
         if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
             detail = (
                 response.get("message", "invalid response") if isinstance(response, dict) else type(response).__name__
             )
             raise RuntimeError(f"Fyers access-token validation failed: {detail}")
+
+    @property
+    def token_version(self) -> int:
+        """Return the credential generation used to recreate a WebSocket feed."""
+        with self._credential_lock:
+            return self._token_version
+
+    def replace_access_token(
+        self,
+        access_token: str,
+        *,
+        persist: Callable[[str], None] | None = None,
+    ) -> None:
+        """Validate and atomically install a newly approved Fyers access token."""
+        token = str(access_token).strip()
+        if not token:
+            raise ValueError("A non-empty Fyers access token is required.")
+        candidate_model = self._create_model(token)
+        self._install_request_timeout(candidate_model)
+        response = candidate_model.get_profile()
+        if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
+            detail = (
+                response.get("message", "invalid response")
+                if isinstance(response, dict)
+                else type(response).__name__
+            )
+            raise RuntimeError(f"Fyers access-token validation failed: {detail}")
+        if persist is not None:
+            persist(token)
+        with self._credential_lock:
+            self.access_token = token
+            self._model = candidate_model
+            self._token_version += 1
 
     def _read_fyers_symbol_master(self) -> pd.DataFrame:
         """Refresh the public Fyers NSE F&O symbol master atomically."""
@@ -352,7 +390,9 @@ class FyersMarketDataClient:
         }
         for attempt in range(FYERS_HISTORY_BAD_REQUEST_RETRIES + 1):
             self._wait_for_history_request_slot()
-            response = self._model.history(data=request)
+            with self._credential_lock:
+                model = self._model
+            response = model.history(data=request)
             self._last_history_request_at = time.monotonic()
             if (
                 isinstance(response, dict)
@@ -489,7 +529,7 @@ class FyersMarketDataClient:
             f"{FYERS_EXPIRED_FNO_API_URL}/{endpoint}",
             params=params,
             headers={
-                "Authorization": f"{self.client_id}:{self.access_token}",
+                "Authorization": f"{self.client_id}:{self._access_token_snapshot()}",
                 "Content-Type": "application/json",
                 "version": "3",
             },
@@ -528,7 +568,9 @@ class FyersMarketDataClient:
         symbols = list(requested)
         for start in range(0, len(symbols), FYERS_QUOTE_BATCH_SIZE):
             batch = symbols[start : start + FYERS_QUOTE_BATCH_SIZE]
-            response = self._model.quotes(data={"symbols": ",".join(batch)})
+            with self._credential_lock:
+                model = self._model
+            response = model.quotes(data={"symbols": ",".join(batch)})
             if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
                 detail = (
                     response.get("message", "invalid response")
@@ -554,6 +596,11 @@ class FyersMarketDataClient:
                     result[requested[symbol]] = price
         return result
 
+    def _access_token_snapshot(self) -> str:
+        """Return one internally consistent token value for direct REST requests."""
+        with self._credential_lock:
+            return self.access_token
+
     def fetch_option_chain(
         self,
         under_security_id: int,
@@ -569,7 +616,9 @@ class FyersMarketDataClient:
         expiry_timestamp = self._expiry_timestamp_by_date.get(expiry)
         if expiry_timestamp is None:
             raise ValueError(f"Fyers contract master has no expiry timestamp for {expiry}.")
-        response = self._model.optionchain(
+        with self._credential_lock:
+            model = self._model
+        response = model.optionchain(
             data={
                 "symbol": symbol,
                 "strikecount": 50,
@@ -635,6 +684,7 @@ class FyersMarketFeed:
         except ImportError as exc:
             raise RuntimeError("The Fyers WebSocket client is not installed.") from exc
         self._client = client
+        self.token_version = client.token_version
         self._queue: queue.Queue[object] = queue.Queue()
         self._connected = threading.Event()
         self._error: object | None = None
@@ -657,7 +707,7 @@ class FyersMarketFeed:
             self._socket.keep_running()
 
         self._socket = data_ws.FyersDataSocket(
-            access_token=f"{client.client_id}:{client.access_token}",
+            access_token=f"{client.client_id}:{client._access_token_snapshot()}",
             log_path="",
             litemode=False,
             write_to_file=False,

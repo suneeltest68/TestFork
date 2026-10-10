@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -158,11 +159,22 @@ class RedactingFilter(logging.Filter):
     def __init__(self, secrets: Iterable[str] = ()) -> None:
         super().__init__()
         self._secrets = tuple(str(secret) for secret in secrets if str(secret))
+        self._secrets_lock = threading.Lock()
+
+    def add_secrets(self, secrets: Iterable[str]) -> None:
+        """Add credentials created after logging setup to this redaction guard."""
+        additions = {str(secret) for secret in secrets if str(secret)}
+        if not additions:
+            return
+        with self._secrets_lock:
+            self._secrets = tuple(sorted(set(self._secrets) | additions, key=len, reverse=True))
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = redact_text(record.msg, self._secrets)
+        with self._secrets_lock:
+            secrets = self._secrets
+        record.msg = redact_text(record.msg, secrets)
         if record.args:
-            record.args = redact_payload(record.args, self._secrets)
+            record.args = redact_payload(record.args, secrets)
         if record.exc_info:
             # A raw exception object can carry the offending request/response
             # in its args, and logging would normally format that traceback
@@ -171,7 +183,7 @@ class RedactingFilter(logging.Filter):
             # into the message, and clear exc_info/exc_text so the logging
             # machinery has nothing secret-bearing left to append.
             formatter = logging.Formatter()
-            record.msg = f"{record.msg}\n{redact_text(formatter.formatException(record.exc_info), self._secrets)}"
+            record.msg = f"{record.msg}\n{redact_text(formatter.formatException(record.exc_info), secrets)}"
             record.exc_info = None
             record.exc_text = None
         return True
@@ -189,3 +201,21 @@ def install_redaction_filter(logger: logging.Logger, secrets: Iterable[str] = ()
     logger.addFilter(guard)
     for handler in logger.handlers:
         handler.addFilter(guard)
+
+
+def add_redaction_secrets(logger: logging.Logger, secrets: Iterable[str]) -> None:
+    """Register runtime-issued credentials with installed logger redaction guards."""
+    additions = tuple(secrets)
+    guards = {
+        item
+        for item in (
+            *logger.filters,
+            *(filter_item for handler in logger.handlers for filter_item in handler.filters),
+        )
+        if isinstance(item, RedactingFilter)
+    }
+    if guards:
+        for guard in guards:
+            guard.add_secrets(additions)
+        return
+    install_redaction_filter(logger, additions)

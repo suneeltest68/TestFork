@@ -8,6 +8,7 @@ import logging
 from Dependencies.secret_redaction import (
     REDACTED,
     RedactingFilter,
+    add_redaction_secrets,
     environment_secrets,
     install_redaction_filter,
     redact_payload,
@@ -194,3 +195,24 @@ def test_install_redaction_filter_covers_logger_and_existing_handlers():
     # The guard sits on the handler too, so records that reach the handler
     # directly (propagated from child loggers) are also scrubbed.
     assert any(isinstance(f, RedactingFilter) for f in handler.filters)
+
+
+def test_runtime_credentials_are_added_to_installed_redaction_guards():
+    secret = "CANARY-ROTATED-FYERS-TOKEN"
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger("mat110.runtime-secret.canary")
+    logger.handlers = [handler]
+    logger.filters.clear()
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    install_redaction_filter(logger)
+
+    add_redaction_secrets(logger, (secret,))
+    logger.warning("rotated credential=%s", secret)
+
+    output = stream.getvalue()
+    logger.handlers.clear()
+    logger.filters.clear()
+    assert secret not in output
+    assert REDACTED in output
