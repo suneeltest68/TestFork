@@ -6,6 +6,7 @@ import logging
 import math
 import queue
 import threading
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ DHAN_SCRIP_MASTER_URL = "https://images.dhan.co/api-data/api-scrip-master-detail
 FYERS_NIFTY_SYMBOL = "NSE:NIFTY50-INDEX"
 FYERS_BANKNIFTY_SYMBOL = "NSE:NIFTYBANK-INDEX"
 FYERS_FINNIFTY_SYMBOL = "NSE:FINNIFTY-INDEX"
+FYERS_EXPIRED_FNO_API_URL = "https://api-t1.fyers.in/data/history/fno/expired"
 FYERS_INDEX_SYMBOLS = {
     13: FYERS_NIFTY_SYMBOL,
     25: FYERS_BANKNIFTY_SYMBOL,
@@ -27,7 +29,12 @@ FYERS_INDEX_SYMBOLS = {
 RUNNER_SEGMENT_CODES = {"IDX_I": 0, "NSE_FNO": 2}
 FYERS_QUOTE_BATCH_SIZE = 50
 FYERS_SYMBOL_MASTER_TIMEOUT_SECONDS = 30
-FYERS_HISTORY_RESOLUTIONS = frozenset({1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 240})
+FYERS_HISTORY_RESOLUTIONS = frozenset({1, 2, 3, 5, 10, 15, 20, 30, 60, 120, 240, "5S"})
+FYERS_EXPIRED_FNO_RESOLUTIONS = frozenset(
+    {"5S", "1", "2", "3", "5", "10", "15", "20", "30", "45", "60", "120", "180", "240", "1D", "1W", "1M"}
+)
+FYERS_MIN_HISTORY_REQUEST_INTERVAL_SECONDS = 0.6
+FYERS_HISTORY_BAD_REQUEST_RETRIES = 2
 _IST = ZoneInfo("Asia/Kolkata")
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,10 +103,10 @@ class FyersMarketDataClient:
         self._install_request_timeout()
         self._symbol_by_dhan_id: dict[int, str] = dict(FYERS_INDEX_SYMBOLS)
         self._identity_by_symbol: dict[str, tuple[str, int]] = {
-            symbol: ("IDX_I", security_id)
-            for security_id, symbol in FYERS_INDEX_SYMBOLS.items()
+            symbol: ("IDX_I", security_id) for security_id, symbol in FYERS_INDEX_SYMBOLS.items()
         }
         self._expiry_timestamp_by_date: dict[date, int] = {}
+        self._last_history_request_at = 0.0
         if load_symbol_mappings:
             self._load_symbol_mappings(symbol_master_frame, dhan_master_frame)
 
@@ -125,8 +132,7 @@ class FyersMarketDataClient:
             from fyers_apiv3 import fyersModel
         except ImportError as exc:
             raise RuntimeError(
-                "Fyers API client is missing. Install the project dependencies "
-                "from requirements.txt."
+                "Fyers API client is missing. Install the project dependencies from requirements.txt."
             ) from exc
         return fyersModel.FyersModel(
             client_id=self.client_id,
@@ -140,9 +146,7 @@ class FyersMarketDataClient:
         response = self._model.get_profile()
         if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
             detail = (
-                response.get("message", "invalid response")
-                if isinstance(response, dict)
-                else type(response).__name__
+                response.get("message", "invalid response") if isinstance(response, dict) else type(response).__name__
             )
             raise RuntimeError(f"Fyers access-token validation failed: {detail}")
 
@@ -191,9 +195,7 @@ class FyersMarketDataClient:
                 }
                 if not required.issubset(columns):
                     missing = sorted(required - columns)
-                    raise ValueError(
-                        f"Downloaded contract master is missing required columns: {missing}"
-                    )
+                    raise ValueError(f"Downloaded contract master is missing required columns: {missing}")
                 temporary.replace(master_path)
             finally:
                 response.close()
@@ -266,9 +268,7 @@ class FyersMarketDataClient:
             self._expiry_timestamp_by_date[key[1]] = expiry_timestamp
             mapped += 1
         if mapped == 0:
-            raise ValueError(
-                "Fyers and Dhan contract masters did not contain any matching option contracts."
-            )
+            raise ValueError("Fyers and Dhan contract masters did not contain any matching option contracts.")
         _LOGGER.info("Loaded %s Fyers option symbols from the current contract masters.", mapped)
 
     def _symbol_for_security(self, security_id: int) -> str:
@@ -281,9 +281,7 @@ class FyersMarketDataClient:
         """Resolve a runner segment/id pair without accepting mismatched identities."""
         symbol = self._symbol_for_security(security_id)
         if self._identity_by_symbol.get(symbol) != (str(exchange_segment), int(security_id)):
-            raise KeyError(
-                f"No Fyers symbol is mapped for {exchange_segment} security ID {security_id}."
-            )
+            raise KeyError(f"No Fyers symbol is mapped for {exchange_segment} security ID {security_id}.")
         return symbol
 
     def fetch_index_1m_ohlc(
@@ -306,9 +304,7 @@ class FyersMarketDataClient:
         )
         if not frame.empty:
             frame["timestamp"] = (
-                pd.to_datetime(frame["timestamp"], unit="s", utc=True)
-                .dt.tz_convert(_IST)
-                .dt.tz_localize(None)
+                pd.to_datetime(frame["timestamp"], unit="s", utc=True).dt.tz_convert(_IST).dt.tz_localize(None)
             )
         return frame[["timestamp", "open", "high", "low", "close", "volume"]]
 
@@ -325,33 +321,64 @@ class FyersMarketDataClient:
             symbol = FYERS_INDEX_SYMBOLS[int(security_id)]
         except KeyError as exc:
             raise ValueError(f"Unsupported Fyers index security ID: {security_id}") from exc
+        return self.fetch_history(
+            symbol,
+            start_date,
+            end_date,
+            resolution=interval,
+        )
+
+    def fetch_history(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        *,
+        resolution: int | str,
+    ) -> pd.DataFrame:
+        """Fetch candles for a Fyers symbol at a supported minute or 5-second resolution."""
         if start_date > end_date:
             raise ValueError("Fyers history start date must not be after its end date.")
-        if interval not in FYERS_HISTORY_RESOLUTIONS:
-            raise ValueError(f"Unsupported Fyers history interval: {interval}")
-        response = self._model.history(
-            data={
-                "symbol": symbol,
-                "resolution": str(interval),
-                "date_format": "1",
-                "range_from": start_date.isoformat(),
-                "range_to": end_date.isoformat(),
-                "cont_flag": "1",
-            }
-        )
+        normalized_resolution: int | str = resolution.upper() if isinstance(resolution, str) else resolution
+        if normalized_resolution not in FYERS_HISTORY_RESOLUTIONS:
+            raise ValueError(f"Unsupported Fyers history resolution: {resolution}")
+        request = {
+            "symbol": symbol,
+            "resolution": str(normalized_resolution),
+            "date_format": "1",
+            "range_from": start_date.isoformat(),
+            "range_to": end_date.isoformat(),
+            "cont_flag": "1",
+        }
+        for attempt in range(FYERS_HISTORY_BAD_REQUEST_RETRIES + 1):
+            self._wait_for_history_request_slot()
+            response = self._model.history(data=request)
+            self._last_history_request_at = time.monotonic()
+            if (
+                isinstance(response, dict)
+                and str(response.get("s", "")).lower() == "error"
+                and str(response.get("message", "")).strip().lower() == "bad request"
+                and attempt < FYERS_HISTORY_BAD_REQUEST_RETRIES
+            ):
+                _LOGGER.warning(
+                    "Fyers history returned a transient bad request for %s; retrying (%s/%s).",
+                    symbol,
+                    attempt + 1,
+                    FYERS_HISTORY_BAD_REQUEST_RETRIES,
+                )
+                time.sleep(attempt + 1)
+                continue
+            break
         if not isinstance(response, dict):
             raise RuntimeError(f"Fyers history request failed for {symbol}: invalid response")
         status = str(response.get("s", "")).lower()
         if status in {"no_data", "error"} and any(
-            marker in str(response.get("message", "")).lower()
-            for marker in ("no data", "no records")
+            marker in str(response.get("message", "")).lower() for marker in ("no data", "no records")
         ):
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
         if status != "ok":
             detail = (
-                response.get("message", "invalid response")
-                if isinstance(response, dict)
-                else type(response).__name__
+                response.get("message", "invalid response") if isinstance(response, dict) else type(response).__name__
             )
             raise RuntimeError(f"Fyers history request failed for {symbol}: {detail}")
         candles = response.get("candles")
@@ -364,6 +391,129 @@ class FyersMarketDataClient:
         for column in ("open", "high", "low", "close", "volume"):
             frame[column] = pd.to_numeric(frame[column], errors="raise")
         return frame[["timestamp", "open", "high", "low", "close", "volume"]]
+
+    def fetch_expiry_dates(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """Fetch expired-options expiry dates available for an underlying."""
+        response = self._fetch_expired_fno_endpoint(
+            "expiry-dates",
+            {
+                "symbol": symbol,
+                "range_from": start_date.isoformat(),
+                "range_to": end_date.isoformat(),
+                "date_format": "1",
+            },
+        )
+        data = response.get("data")
+        expiry_dates = data.get("expiry_dates") if isinstance(data, dict) else None
+        options = expiry_dates.get("options") if isinstance(expiry_dates, dict) else None
+        if not isinstance(options, list):
+            raise ValueError("Fyers expiry-dates response has no options expiry list.")
+        try:
+            return sorted({date.fromisoformat(str(value)) for value in options})
+        except ValueError as exc:
+            raise ValueError("Fyers expiry-dates response contains an invalid date.") from exc
+
+    def fetch_expired_option_symbols(
+        self,
+        symbol: str,
+        expiry_date: date,
+    ) -> list[str]:
+        """Fetch expired option symbols for an underlying and expiry."""
+        response = self._fetch_expired_fno_endpoint(
+            "underlying-symbols",
+            {"symbol": symbol, "expiry_date": expiry_date.isoformat()},
+        )
+        data = response.get("data")
+        contracts = data.get("contracts") if isinstance(data, dict) else None
+        options = contracts.get("options") if isinstance(contracts, dict) else None
+        if not isinstance(options, list) or any(not isinstance(item, str) for item in options):
+            raise ValueError("Fyers expired-contracts response has no valid options list.")
+        return options
+
+    def fetch_expired_option_history(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        *,
+        resolution: int | str,
+    ) -> pd.DataFrame:
+        """Fetch OHLCV candles for an expired option contract."""
+        normalized_resolution = str(resolution).upper()
+        if normalized_resolution not in FYERS_EXPIRED_FNO_RESOLUTIONS:
+            raise ValueError(f"Unsupported expired F&O history resolution: {resolution}")
+        if start_date > end_date:
+            raise ValueError("Expired F&O history start date must not be after its end date.")
+        response = self._fetch_expired_fno_endpoint(
+            "historical-data",
+            {
+                "symbol": symbol,
+                "resolution": str(normalized_resolution),
+                "date_format": "1",
+                "range_from": start_date.isoformat(),
+                "range_to": end_date.isoformat(),
+            },
+            allow_no_data=True,
+        )
+        candles = response.get("candles")
+        if not isinstance(candles, list):
+            raise ValueError(f"Fyers expired history response for {symbol} has no candle list.")
+        if not candles:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        columns = response.get("columns")
+        if not isinstance(columns, list) or not {"timestamp", "open", "high", "low", "close", "volume"}.issubset(
+            columns
+        ):
+            raise ValueError(f"Fyers expired history response for {symbol} has invalid candle columns.")
+        frame = pd.DataFrame(candles, columns=columns)
+        for column in ("timestamp", "open", "high", "low", "close", "volume"):
+            frame[column] = pd.to_numeric(frame[column], errors="raise")
+        return frame[["timestamp", "open", "high", "low", "close", "volume"]]
+
+    def _fetch_expired_fno_endpoint(
+        self,
+        endpoint: str,
+        params: dict[str, str],
+        *,
+        allow_no_data: bool = False,
+    ) -> dict[str, object]:
+        """Call one documented Fyers expired-F&O endpoint with the SDK credentials."""
+        self._wait_for_history_request_slot()
+        response = requests.get(
+            f"{FYERS_EXPIRED_FNO_API_URL}/{endpoint}",
+            params=params,
+            headers={
+                "Authorization": f"{self.client_id}:{self.access_token}",
+                "Content-Type": "application/json",
+                "version": "3",
+            },
+            timeout=self.request_timeout_seconds,
+        )
+        self._last_history_request_at = time.monotonic()
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Fyers expired F&O {endpoint} endpoint returned an invalid response.")
+        status = str(payload.get("s", "")).lower()
+        if allow_no_data and status == "no_data":
+            return payload
+        if status != "ok":
+            detail = payload.get("message", "invalid response")
+            code = payload.get("code", "unknown")
+            raise RuntimeError(f"Fyers expired F&O {endpoint} request failed ({code}): {detail}")
+        return payload
+
+    def _wait_for_history_request_slot(self) -> None:
+        """Keep all Fyers history endpoints below the observed request burst limit."""
+        elapsed = time.monotonic() - self._last_history_request_at
+        if elapsed < FYERS_MIN_HISTORY_REQUEST_INTERVAL_SECONDS:
+            time.sleep(FYERS_MIN_HISTORY_REQUEST_INTERVAL_SECONDS - elapsed)
 
     def fetch_ltp_map(self, securities_by_segment: dict[str, list[int]]) -> dict[tuple[str, int], float]:
         """Fetch quotes in Fyers-sized batches and key them by runner segment/id."""
@@ -429,9 +579,7 @@ class FyersMarketDataClient:
         )
         if not isinstance(response, dict) or str(response.get("s", "")).lower() != "ok":
             detail = (
-                response.get("message", "invalid response")
-                if isinstance(response, dict)
-                else type(response).__name__
+                response.get("message", "invalid response") if isinstance(response, dict) else type(response).__name__
             )
             raise RuntimeError(f"Fyers option-chain request failed for {expiry}: {detail}")
         payload = response.get("data")
@@ -459,8 +607,7 @@ class FyersMarketDataClient:
                 "top_bid_price": entry.get("bid", 0),
                 "top_ask_price": entry.get("ask", 0),
                 "greeks": {
-                    name: option_greeks.get(name, entry.get(name, 0))
-                    for name in ("delta", "gamma", "theta", "vega")
+                    name: option_greeks.get(name, entry.get(name, 0)) for name in ("delta", "gamma", "theta", "vega")
                 },
             }
             chain.setdefault(f"{strike:.4f}", {})[right] = node
@@ -491,9 +638,7 @@ class FyersMarketFeed:
         self._queue: queue.Queue[object] = queue.Queue()
         self._connected = threading.Event()
         self._error: object | None = None
-        self._initial_symbols = [
-            client._symbol_for_identity(str(item[0]), int(item[1])) for item in instruments
-        ]
+        self._initial_symbols = [client._symbol_for_identity(str(item[0]), int(item[1])) for item in instruments]
 
         def on_message(message: object) -> None:
             self._queue.put(message)
@@ -571,18 +716,12 @@ class FyersMarketFeed:
         }
 
     def subscribe_symbols(self, instruments: list[tuple[str, str]]) -> None:
-        symbols = [
-            self._client._symbol_for_identity(str(item[0]), int(item[1]))
-            for item in instruments
-        ]
+        symbols = [self._client._symbol_for_identity(str(item[0]), int(item[1])) for item in instruments]
         if symbols:
             self._socket.subscribe(symbols=symbols, data_type="SymbolUpdate")
 
     def unsubscribe_symbols(self, instruments: list[tuple[str, str]]) -> None:
-        symbols = [
-            self._client._symbol_for_identity(str(item[0]), int(item[1]))
-            for item in instruments
-        ]
+        symbols = [self._client._symbol_for_identity(str(item[0]), int(item[1])) for item in instruments]
         if symbols:
             self._socket.unsubscribe(symbols=symbols, data_type="SymbolUpdate")
 

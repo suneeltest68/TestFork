@@ -95,6 +95,7 @@ INDEX_SCRIPTS = {
 BACKTEST_SCRIPTS = {
     "renko": "My Backtest Files (For Reference)/renko_strategy_backtest.py",
     "ema": "My Backtest Files (For Reference)/ema_trend_strategy_backtest.py",
+    "ema-options": "Dependencies/ema_options_backtest.py",
     "heikin": "My Backtest Files (For Reference)/heikin_ashi_futures_5y_backtest.py",
     "cpr": "My Backtest Files (For Reference)/cpr_strategy_backtest.py",
     "cpr-algo4": "My Backtest Files (For Reference)/cpr_algo4_backtest.py",
@@ -166,12 +167,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     backtest = sub.add_parser(
         "backtest",
-        help="Run one strategy's backtest against a historical-data CSV.",
+        help="Run one strategy's backtest against historical data.",
     )
     backtest.add_argument(
         "--strategy", required=True, choices=sorted(BACKTEST_SCRIPTS),
-        help="Which strategy to backtest. Flags like --data and --dataset pass "
-             "through to that strategy's backtest script.",
+        help="Which strategy to backtest. CSV-based scripts accept --data; "
+             "ema-options accepts --start-date/--end-date and fetches Fyers data.",
     )
 
     sub.add_parser(

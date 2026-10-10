@@ -138,7 +138,7 @@ Each subfolder has its own `Readme.md` with the details.
 | Command | What it does | Example |
 |---|---|---|
 | `fetch-data --index {nifty,banknifty,finnifty}` | Download 1-min OHLC for an index | `python algo.py fetch-data --index nifty --interval 5 --lookback 5y` |
-| `backtest --strategy {renko,ema,heikin,cpr,profit-shooter,goldmine,money-machine}` | Backtest one strategy against a CSV | `python algo.py backtest --strategy renko --data "Backtest Outputs/nifty_renko_futures_5y_1min_data.csv"` |
+| `backtest --strategy {renko,ema,ema-options,heikin,cpr,profit-shooter,goldmine,money-machine}` | Backtest one strategy; `ema-options` fetches Fyers option history | `python algo.py backtest --strategy renko --data "Backtest Outputs/nifty_renko_futures_5y_1min_data.csv"` |
 | `run` | Start the front-test master (paper by default; live per `.env`) | `python algo.py run` |
 | `setup-fyers-token` | Generate or refresh the Fyers market-data access token | `python algo.py setup-fyers-token` |
 | `setup-token` | One-time DhanHQ execution token setup (writes `.env`) | `python algo.py setup-token` |
@@ -153,6 +153,8 @@ Run `python algo.py --help`, or `python algo.py <command> --help`, for the detai
 3. Once a strategy looks good, run `nifty_multi_strategy_master.py` for multi-strategy execution — paper by default, or live once you've configured a broker (Setup step 6).
 
 (Or do all three with the unified CLI above: `python algo.py fetch-data --index nifty` → `python algo.py backtest --strategy renko --data ...` → `python algo.py run`.)
+
+For an EMA options-premium replay, edit `START_DATE` and `END_DATE` in [`run_ema_options_backtest.py`](run_ema_options_backtest.py), then run `python run_ema_options_backtest.py`. Dates use `YYYY-MM-DD`. You can also run `python algo.py backtest --strategy ema-options --start-date YYYY-MM-DD --end-date YYYY-MM-DD` directly. It fetches NIFTY 1-minute candles from Fyers, builds complete 5-minute candles for the shared live EMA signal engine, and requests option candles only after an entry signal. Recent contracts use 5-second history; ranges older than 30 days use Fyers' expired F&O expiry-date, contract-symbol, and historical-data endpoints at 1-minute resolution. Entries buy the ATM CE for LONG or ATM PE for SHORT, use the second Fyers-listed expiry on or after each entry date, and fill at the first available option candle open after the completed signal bar. The expired-contract endpoint does not supply historical lot size, so the replay assumes 65 units per NIFTY lot. Each run writes a trade CSV with cumulative P&L and drawdown columns, a JSON summary, and a standalone HTML report with an at-a-glance summary and formatted trade table under `Backtest Outputs/`; Fyers credentials must be configured in `Dependencies/.env`. The report and summary disclose estimated costs and risk controls the replay does not model.
 
 The `Backtest Outputs/` folder is `.gitignore`-d, so generated CSVs/logs stay local.
 
