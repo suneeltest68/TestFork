@@ -8,9 +8,11 @@ import secrets
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlsplit
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -23,6 +25,14 @@ _TELEGRAM_API = "https://api.telegram.org"
 _AUTH_CODE_TTL_SECONDS = 10 * 60
 _SESSION_CHECK_INTERVAL_SECONDS = 5 * 60
 _HTTP_TIMEOUT_SECONDS = (5.0, 30.0)
+
+
+def _next_daily_auth_reminder(now: datetime) -> datetime:
+    """Return the next 09:00 wall-clock time in the supplied timezone."""
+    reminder_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    if reminder_at <= now:
+        reminder_at += timedelta(days=1)
+    return reminder_at
 
 
 def load_persisted_access_token(token_file: Path, fallback: str = "") -> str:
@@ -111,8 +121,10 @@ class FyersTelegramAuthService:
         self._offset = 0
         self._updates_initialized = False
         self._auth_prompted = False
+        self._last_daily_auth_date = ""
         self._next_session_check_at = time.monotonic() + _SESSION_CHECK_INTERVAL_SECONDS
         self._poll_thread: threading.Thread | None = None
+        self._daily_auth_thread: threading.Thread | None = None
         self._httpd = self._build_http_server()
         self._http_thread = threading.Thread(
             target=self._httpd.serve_forever,
@@ -171,6 +183,12 @@ class FyersTelegramAuthService:
             daemon=True,
         )
         self._poll_thread.start()
+        self._daily_auth_thread = threading.Thread(
+            target=self._daily_auth_reminder_loop,
+            name="FyersDailyAuthReminder",
+            daemon=True,
+        )
+        self._daily_auth_thread.start()
         _LOGGER.info("Fyers Telegram authentication callback listening on port %s.", self.port)
 
     def stop(self, timeout: float = 2.0) -> None:
@@ -181,6 +199,8 @@ class FyersTelegramAuthService:
         self._http_thread.join(timeout=timeout)
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=timeout)
+        if self._daily_auth_thread is not None:
+            self._daily_auth_thread.join(timeout=timeout)
 
     def request_authorization(self, reason: str) -> None:
         """Create a fresh state and send its one-use Fyers login link to the private chat."""
@@ -335,6 +355,35 @@ class FyersTelegramAuthService:
             self._send_message(text)
         except (requests.RequestException, RuntimeError) as exc:
             _LOGGER.warning("Fyers Telegram notification failed (%s).", type(exc).__name__)
+
+    def _now_ist(self) -> datetime:
+        """Return the current clock time in Asia/Kolkata."""
+        return datetime.now(ZoneInfo("Asia/Kolkata"))
+
+    def _daily_auth_reminder_loop(self) -> None:
+        """Wait directly for each 09:00 IST boundary instead of polling for it."""
+        while not self._stop_event.is_set():
+            now = self._now_ist()
+            reminder_at = _next_daily_auth_reminder(now)
+            delay = (reminder_at - now).total_seconds()
+            if self._stop_event.wait(delay):
+                return
+            self._maybe_send_daily_auth_reminder()
+
+    def _maybe_send_daily_auth_reminder(self) -> None:
+        """Send the scheduled fresh Fyers auth link once per calendar day."""
+        now = self._now_ist()
+        today = now.date().isoformat()
+        with self._state_lock:
+            if self._last_daily_auth_date == today:
+                return
+            self._last_daily_auth_date = today
+            if self._auth_prompted:
+                return
+
+        self.request_authorization(
+            "Daily Fyers refresh: approve the access link for today's trading session."
+        )
 
     def _check_session(self) -> None:
         if time.monotonic() < self._next_session_check_at:

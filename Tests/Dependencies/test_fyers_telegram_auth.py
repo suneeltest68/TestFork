@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import socket
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -153,6 +155,50 @@ def test_only_configured_private_chat_can_request_auth(
     )
 
     assert request_auth.called is accepted
+    service._httpd.server_close()
+
+
+def test_daily_reminder_sends_one_auth_link_each_morning(tmp_path):
+    service = _service(tmp_path)
+    request_auth = Mock()
+    service.request_authorization = request_auth
+
+    service._now_ist = Mock(return_value=datetime(2026, 10, 11, 9, tzinfo=ZoneInfo("Asia/Kolkata")))
+
+    service._maybe_send_daily_auth_reminder()
+    request_auth.assert_called_once()
+
+    service._maybe_send_daily_auth_reminder()
+    request_auth.assert_called_once()
+    service._httpd.server_close()
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2026, 10, 11, 8, 59, 59, tzinfo=ZoneInfo("Asia/Kolkata")),
+         datetime(2026, 10, 11, 9, 0, tzinfo=ZoneInfo("Asia/Kolkata"))),
+        (datetime(2026, 10, 11, 9, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+         datetime(2026, 10, 12, 9, 0, tzinfo=ZoneInfo("Asia/Kolkata"))),
+        (datetime(2026, 10, 11, 23, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+         datetime(2026, 10, 12, 9, 0, tzinfo=ZoneInfo("Asia/Kolkata"))),
+    ],
+)
+def test_daily_auth_scheduler_targets_next_9am_ist(now, expected):
+    assert auth._next_daily_auth_reminder(now) == expected
+
+
+def test_daily_auth_reminder_does_not_duplicate_active_auth_prompt(tmp_path):
+    service = _service(tmp_path)
+    service._auth_prompted = True
+    request_auth = Mock()
+    service.request_authorization = request_auth
+    service._now_ist = Mock(return_value=datetime(2026, 10, 11, 9, tzinfo=ZoneInfo("Asia/Kolkata")))
+
+    service._maybe_send_daily_auth_reminder()
+
+    request_auth.assert_not_called()
+    assert service._last_daily_auth_date == "2026-10-11"
     service._httpd.server_close()
 
 
