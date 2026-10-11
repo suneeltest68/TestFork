@@ -167,6 +167,7 @@ def test_daily_reminder_sends_one_auth_link_each_morning(tmp_path):
 
     service._maybe_send_daily_auth_reminder()
     request_auth.assert_called_once()
+    assert "09:00 IST" in request_auth.call_args.args[0]
 
     service._maybe_send_daily_auth_reminder()
     request_auth.assert_called_once()
