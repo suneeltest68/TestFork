@@ -3678,13 +3678,18 @@ class TestExecutionModeResults(unittest.TestCase):
             self._worker("Renko", "LIVE", 100.0, 1),
             self._worker("EMA", "PAPER", -25.0, 2),
         ]
+        ist_now = datetime(2026, 10, 11, 9, 30, tzinfo=master_file.IST_TIMEZONE)
 
-        master_file._publish_eod_summary(workers, event_queue)
+        with patch.object(master_file, "_ist_now", return_value=ist_now):
+            master_file._publish_eod_summary(workers, event_queue)
 
         event = event_queue.get_nowait()
         self.assertEqual(event["mode"], "MIXED")
         self.assertEqual([row["mode"] for row in event["rows"]], ["LIVE", "PAPER"])
-        self.assertIn("[MIXED]", master_file.format_trade_message(event))
+        self.assertEqual(event["ts"], "2026-10-11 09:30:00 IST")
+        message = master_file.format_trade_message(event)
+        self.assertIn("[MIXED]", message)
+        self.assertIn("2026-10-11 09:30:00 IST", message)
 
     def test_log_parser_keeps_new_modes_and_legacy_paper_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -12353,7 +12358,11 @@ class TestSessionStatePersistence(unittest.TestCase):
         """One hook on publish_trade_event covers all 25 call sites."""
         state = MagicMock()
         self.worker.session_state = state
-        self.worker.publish_trade_event({"action": "EXIT", "pnl": -929.5})
+        event_queue = master_file.queue.Queue()
+        self.worker.trade_event_queue = event_queue
+        ist_now = datetime(2026, 10, 11, 9, 30, tzinfo=master_file.IST_TIMEZONE)
+        with patch.object(master_file, "_ist_now", return_value=ist_now):
+            self.worker.publish_trade_event({"action": "EXIT", "pnl": -929.5})
 
         state.record_trade_event.assert_called_once()
         recorded = state.record_trade_event.call_args.args[0]
@@ -12361,6 +12370,10 @@ class TestSessionStatePersistence(unittest.TestCase):
         # publish_trade_event stamps these before handing the event over.
         self.assertEqual(recorded["strategy"], "Renko")
         self.assertEqual(recorded["mode"], "PAPER")
+        self.assertEqual(recorded["ts"], "2026-10-11 09:30:00 IST")
+        queued = event_queue.get_nowait()
+        self.assertEqual(queued["ts"], recorded["ts"])
+        self.assertIn("2026-10-11 09:30:00 IST", master_file.format_trade_message(queued))
 
     def test_state_is_recorded_even_without_telegram(self):
         """Notifications are optional; losing the day's books is not."""

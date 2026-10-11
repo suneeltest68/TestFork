@@ -6103,7 +6103,7 @@ class BasePaperStrategyWorker(threading.Thread):
         """
         try:
             event.setdefault("strategy", self.strategy_name)
-            event.setdefault("ts", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            event.setdefault("ts", _ist_now().strftime("%Y-%m-%d %H:%M:%S IST"))
             event.setdefault("mode", "LIVE" if self.live_trading else "PAPER")
             mode_parts = _execution_mode_parts(event["mode"])
             with self._execution_mode_lock:
@@ -17065,7 +17065,7 @@ def _publish_eod_summary(workers, event_queue) -> None:
                 "rows": rows,
                 "total_pnl": total_pnl,
                 "total_trades": total_trades,
-                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts": _ist_now().strftime("%Y-%m-%d %H:%M:%S IST"),
                 "mode": overall_mode,
             }
         )
@@ -18037,7 +18037,7 @@ def _enqueue_startup_exposure_alert(
         "direction": safe_details,
         "reason": safe_details,
         "mode": "PAPER",
-        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": _ist_now().strftime("%Y-%m-%d %H:%M:%S IST"),
     }
     try:
         event_queue.put_nowait(event)

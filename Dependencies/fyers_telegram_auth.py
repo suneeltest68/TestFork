@@ -382,7 +382,7 @@ class FyersTelegramAuthService:
                 return
 
         self.request_authorization(
-            "Daily Fyers refresh: approve the access link for today's trading session."
+            "Daily Fyers refresh (09:00 IST): approve the access link for today's trading session."
         )
 
     def _check_session(self) -> None:
